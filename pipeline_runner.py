@@ -7,10 +7,10 @@ import argparse
 # 统一全局配置中心 (Central Configuration)
 # ==========================================
 PIPELINE_CONFIG = {
-    "DEBUG_MODE": False,               # 调试模式（覆盖所有子模块）
-    "DEBUG_ITEM_LIMIT": 5,             # 测试模式下的处理上限 (提纯与字幕阶段)
+    "DEBUG_MODE": True,               # 调试模式（覆盖所有子模块）
+    "DEBUG_ITEM_LIMIT": 10,            # 测试模式下的处理上限 (提纯与字幕阶段)
     "DEBUG_MAX_PAGES": 2,              # 测试模式下抓取历史记录的页数
-    "PROD_MAX_PAGES": 100,             # 正式抓取时的最大历史页数
+    "PROD_MAX_PAGES": 200,             # 正式抓取时的最大历史页数
     "CONCURRENCY_LIMIT": 1,            # 全局并发限制（防止触发412风控）
     "ENABLE_LOCAL_WHISPER": False,     # 字幕阶段：是否开启本地 ASR 极限兜底
     "WHISPER_MODEL_SIZE": "small"      # Whisper 模型精度 (tiny/base/small/medium/large)
@@ -31,12 +31,10 @@ async def run_pipeline(stage_to_run):
     # ---------------------------------------------------------
     if stage_to_run in ['all', '1']:
         print("\n>>> [执行阶段 1] 启动历史数据增量采集 (Collector)...")
-        # 动态注入配置
         stage1_collector.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage1_collector.DEBUG_MAX_PAGES = PIPELINE_CONFIG["DEBUG_MAX_PAGES"]
         stage1_collector.PROD_MAX_PAGES = PIPELINE_CONFIG["PROD_MAX_PAGES"]
         
-        # 直接 awaiting 子模块的 async main()，避免重复启动 Event Loop
         await stage1_collector.main()
 
     # ---------------------------------------------------------
@@ -70,7 +68,6 @@ async def run_pipeline(stage_to_run):
 
 
 if __name__ == '__main__':
-    # 解析命令行启动参数
     parser = argparse.ArgumentParser(description="Mirror 蒸馏认知管线总控台")
     parser.add_argument('--stage', type=str, choices=['all', '1', '1.5', '2'], default='all', 
                         help="选择要执行的流水线阶段 (默认: all 执行全流程)")
@@ -78,17 +75,14 @@ if __name__ == '__main__':
                         help="挂载此标志以激活全局 DEBUG 测试模式")
     args = parser.parse_args()
 
-    # 如果命令行带了 --debug 标志，则覆盖代码里的 PIPELINE_CONFIG
     if args.debug:
         PIPELINE_CONFIG["DEBUG_MODE"] = True
         print("[!] 已通过命令行强制挂载 DEBUG 模式")
 
-    # Windows 平台下强行修复 Event Loop 策略与终端输出编码
     if sys.platform == 'win32':
         os.system('chcp 65001')
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         
-    # 唤起主异步管线
     try:
         asyncio.run(run_pipeline(args.stage))
     except KeyboardInterrupt:

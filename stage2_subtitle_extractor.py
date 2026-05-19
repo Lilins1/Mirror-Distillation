@@ -9,9 +9,6 @@ from datetime import datetime
 import qrcode
 from bilibili_api import Credential
 
-# ==========================================
-# 目录架构重构与全局配置
-# ==========================================
 DATA_DIR = "data"
 ACCOUNT_DIR = os.path.join(DATA_DIR, "account")
 ENRICH_DIR = os.path.join(DATA_DIR, "stage1_enrich")
@@ -21,7 +18,8 @@ SUBTITLES_DIR = os.path.join(STAGE2_DIR, "parsed_videos")
 os.makedirs(STAGE2_DIR, exist_ok=True)
 os.makedirs(SUBTITLES_DIR, exist_ok=True)
 
-INPUT_FILE = os.path.join(ENRICH_DIR, "enriched_links_latest.json")
+# 【核心修复】直接读取 Stage 1.5 的全局高分账本
+INPUT_FILE = os.path.join(ENRICH_DIR, "master_enriched.json")
 PROGRESS_FILE = os.path.join(STAGE2_DIR, "stage2_progress.json")
 GUEST_CREDENTIAL_PATH = os.path.join(ACCOUNT_DIR, "guest_credential.json")
 
@@ -31,19 +29,22 @@ CONCURRENCY_LIMIT = 2
 
 SKIP_CATEGORIES = ["sponsor", "intro", "outro", "interaction"]
 
-# ==========================================
-# AI 语言识别兜底配置 (ASR Fallback)
-# ==========================================
-# 如果开启，当B站人工字幕和AI字幕都失效时，将下载音频并在本地使用 GPU/CPU 强行听写
 ENABLE_LOCAL_WHISPER = False 
-WHISPER_MODEL_SIZE = "small" # 可选: tiny, base, small, medium, large-v3
+WHISPER_MODEL_SIZE = "small" 
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+]
+def get_random_ua(): return random.choice(USER_AGENTS)
 
 async def raw_qr_login_guest():
     print("\n" + "="*50)
     print("[权限隔离] Stage 2 正在请求【小号/抓取专用号】安全凭证...")
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": get_random_ua()}
     
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
         init_resp = await client.get("https://www.bilibili.com")
         buvid3 = init_resp.cookies.get("buvid3", "")
         
@@ -61,7 +62,7 @@ async def raw_qr_login_guest():
         print("="*50)
         
         while True:
-            await asyncio.sleep(2)
+            await asyncio.sleep(random.uniform(2.5, 10))
             poll_resp = await client.get(f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}")
             poll_data = poll_resp.json()['data']
             code = poll_data['code']
@@ -77,12 +78,10 @@ async def raw_qr_login_guest():
                 print("[-] 手机已扫码，请在手机端点击确认登录...")
 
 async def get_guest_cookies():
-    """获取小号/游客 Cookie，实现读写权限分离"""
     if os.path.exists(GUEST_CREDENTIAL_PATH):
         try:
             with open(GUEST_CREDENTIAL_PATH, 'r', encoding='utf-8') as f:
                 cred_data = json.load(f)
-            # 简单验证一下凭证是否存在
             if cred_data.get('sessdata'):
                 return {
                     "SESSDATA": cred_data.get('sessdata', ''),
@@ -92,7 +91,6 @@ async def get_guest_cookies():
         except Exception:
             pass
             
-    # 如果没有找到小号凭证，触发扫码并保存
     cred = await raw_qr_login_guest()
     with open(GUEST_CREDENTIAL_PATH, 'w', encoding='utf-8') as f:
         json.dump({
@@ -112,12 +110,15 @@ async def fetch_ad_segments(client: httpx.AsyncClient, bvid: str):
     url = f"https://sponsor.ajay.app/api/skipSegments?videoID={bvid}&categories={categories_param}"
     ad_segments = []
     try:
-        resp = await client.get(url, timeout=10.0)
+        # 【安全增强】外网 SponsorBlock 极速 3.0 秒熔断防卡死
+        resp = await client.get(url, timeout=3.0)
         if resp.status_code == 200:
             for item in resp.json():
                 segment = item.get("segment")
                 if segment and len(segment) == 2:
                     ad_segments.append(segment)
+    except httpx.TimeoutException:
+        print(f"[WARN] 提取 {bvid} 广告切片超时 (SponsorBlock 连通性差，已安全放行)")
     except Exception as e:
         print(f"[WARN] 提取 {bvid} 广告切片跳过 (可能无赞助): {e}")
     return ad_segments
@@ -127,9 +128,6 @@ def is_segment_in_ad(start_time, end_time, ad_segments):
         if max(start_time, ad_start) < min(end_time, ad_end): return True
     return False
 
-# ====================================================
-# [双重兜底 1] B站原生人工字幕 / B站官方AI字幕提取
-# ====================================================
 async def fetch_bilibili_subtitles(client: httpx.AsyncClient, bvid: str, req_headers: dict):
     view_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
     cid = None
@@ -152,7 +150,6 @@ async def fetch_bilibili_subtitles(client: httpx.AsyncClient, bvid: str, req_hea
 
     if not subs: return [], "none"
 
-    # 分类：区分 UP主人工字幕 和 B站官方自动生成的 AI 字幕
     manual_subs = []
     ai_subs = []
     for s in subs:
@@ -164,11 +161,9 @@ async def fetch_bilibili_subtitles(client: httpx.AsyncClient, bvid: str, req_hea
     target_sub = None
     sub_source = "none"
 
-    # 优先级 1: 人工中文字幕 > 人工其他语言
     if manual_subs:
         target_sub = manual_subs[0]
         sub_source = "bilibili_cc_human"
-    # 优先级 2 (兜底): B站官方 AI 自动字幕
     elif ai_subs:
         target_sub = ai_subs[0]
         sub_source = "bilibili_ai_auto"
@@ -187,9 +182,6 @@ async def fetch_bilibili_subtitles(client: httpx.AsyncClient, bvid: str, req_hea
         
     return [], "none"
 
-# ====================================================
-# [双重兜底 2] 本地 Faster-Whisper 大模型极限转写
-# ====================================================
 def run_whisper_sync(bvid):
     try:
         import yt_dlp
@@ -216,7 +208,6 @@ def run_whisper_sync(bvid):
             return []
 
         try:
-            # 自动探测硬件加速 (CUDA GPU 或 CPU 回退)
             model = WhisperModel(WHISPER_MODEL_SIZE, device="auto", compute_type="default")
             segments, _ = model.transcribe(audio_path, beam_size=5, language="zh")
 
@@ -235,12 +226,8 @@ def run_whisper_sync(bvid):
 
 async def fetch_local_whisper_asr(bvid: str):
     loop = asyncio.get_event_loop()
-    # 丢入默认的线程池执行阻塞任务，防止卡死 asyncio 循环
     return await loop.run_in_executor(None, run_whisper_sync, bvid)
 
-# ====================================================
-# 主流程管线
-# ====================================================
 async def process_single_video(client, bvid, node, progress_cache, semaphore):
     async with semaphore:
         if bvid in progress_cache: return None
@@ -249,10 +236,8 @@ async def process_single_video(client, bvid, node, progress_cache, semaphore):
         req_headers = client.headers.copy()
         req_headers["Referer"] = f"https://www.bilibili.com/video/{bvid}/"
         
-        # 1. 第一阶段获取：请求原生字幕与B站AI字幕
         raw_subs, sub_source = await fetch_bilibili_subtitles(client, bvid, req_headers)
         
-        # 2. 极限兜底：如果前两个都没有，且开启了本地识别
         if not raw_subs and ENABLE_LOCAL_WHISPER:
             raw_subs = await fetch_local_whisper_asr(bvid)
             if raw_subs:
@@ -263,14 +248,12 @@ async def process_single_video(client, bvid, node, progress_cache, semaphore):
         ad_segments = []
         
         if has_subtitles:
-            # 向 SponsorBlock 索取恰饭广告节点
             ad_segments = await fetch_ad_segments(client, bvid)
             for item in raw_subs:
                 start_t = item.get('from', 0)
                 end_t = item.get('to', 0)
                 content = item.get('content', '').strip()
                 
-                # 时间轴清洗，剔除恰饭文案
                 if not is_segment_in_ad(start_t, end_t, ad_segments):
                     cleaned_text_blocks.append(content)
             await asyncio.sleep(random.uniform(1.0, 2.5))
@@ -286,7 +269,7 @@ async def process_single_video(client, bvid, node, progress_cache, semaphore):
             "cognitive_impact_factor": node["cognitive_impact_factor"],
             "processing_status": {
                 "has_subtitles": has_subtitles,
-                "subtitle_source": sub_source,  # "bilibili_cc_human", "bilibili_ai_auto", "local_whisper_asr" 或 "none"
+                "subtitle_source": sub_source, 
                 "is_ad_filtered": len(ad_segments) > 0,
                 "ad_segments_skipped": ad_segments,
                 "subtitle_word_count": word_count 
@@ -306,7 +289,7 @@ async def main():
         return
 
     with open(INPUT_FILE, 'r', encoding='utf-8') as f:
-        enriched_links = json.load(f)
+        master_enriched = json.load(f)
 
     progress_cache = {}
     if os.path.exists(PROGRESS_FILE):
@@ -314,16 +297,16 @@ async def main():
             progress_cache = json.load(f)
 
     cookies = await get_guest_cookies()
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": get_random_ua()}
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    items_to_process = list(enriched_links.items())
     
-    pending_items = [(bvid, node) for bvid, node in items_to_process if bvid not in progress_cache]
+    # 【核心断点逻辑】过滤出未提取过字幕的高优节点
+    pending_items = [(bvid, node) for bvid, node in master_enriched.items() if bvid not in progress_cache]
     if DEBUG_MODE: pending_items = pending_items[:DEBUG_ITEM_LIMIT]
 
     if not pending_items:
-        print("\n[INFO] 所有视频字幕均已提取完毕，暂无增量任务。")
+        print("\n[INFO] 所有高优视频字幕均已提取完毕，暂无增量任务。")
         return
 
     print(f"\n[STAGE 2] 开始处理 {len(pending_items)} 个视频的多模态抽取与清洗...")
