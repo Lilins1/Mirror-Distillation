@@ -14,7 +14,7 @@ except ImportError:
     print("请安装 openai 库: pip install openai")
     sys.exit(1)
 
-# ==================== 全局目录与配置 ====================
+# ==================== 全局配置（可由总控台注入） ====================
 DATA_DIR = "data"
 ACCOUNT_DIR = os.path.join(DATA_DIR, "account")
 STAGE2_DIR = os.path.join(DATA_DIR, "stage2_subtitles")
@@ -25,32 +25,28 @@ os.makedirs(STAGE3_DIR, exist_ok=True)
 PROGRESS_FILE = os.path.join(STAGE3_DIR, "stage3_progress.json")
 DEEPSEEK_CONFIG_PATH = os.path.join(ACCOUNT_DIR, "deepseek_config.json")
 
-# 可被管线总控台覆盖的参数
+# 可被外部覆盖的参数
 DEBUG_MODE = False
 DEBUG_ITEM_LIMIT = 5
 CONCURRENCY_LIMIT = 1
+MIN_VIDEO_DURATION_SECONDS = 60      # 最短视频时长（秒），小于此值跳过总结
 
-# DeepSeek API 基础地址（固定）
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
-# 模型选择相关阈值（可根据实际效果调整）
-HIGH_VALUE_THRESHOLD = 6.0        # 当 impact_score * log(len+1) > 此值时，启用大模型
-MODEL_SMALL = "deepseek-chat"      # 标准模型（64k上下文，性价比高）
-MODEL_LARGE = "deepseek-reasoner"  # 推理增强模型（64k上下文，适合高价值长文）
-
-# 提示词截断控制（保护上下文窗口）
-MAX_INPUT_CHARS = 40000            # 输入给模型的字幕最大字符数（中文约对应30k token，安全边际）
+# 模型选择阈值
+HIGH_VALUE_THRESHOLD = 6.0
+MODEL_SMALL = "deepseek-v4-flash"   # 替代 deepseek-chat
+MODEL_LARGE = "deepseek-v4-pro"     # 替代 deepseek-reasoner
+MAX_INPUT_CHARS = 40000
 
 # ==================== 工具函数 ====================
 def safe_save_json(data: dict, filepath: str):
-    """原子化保存 JSON 文件"""
     tmp_path = filepath + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, filepath)
 
 def load_progress() -> Dict[str, str]:
-    """读取断点进度文件"""
     if os.path.exists(PROGRESS_FILE):
         try:
             with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
@@ -60,7 +56,6 @@ def load_progress() -> Dict[str, str]:
     return {}
 
 def load_deepseek_config() -> Tuple[str, str]:
-    """从 account 目录加载 DeepSeek 配置，返回 (api_key, base_url)"""
     if not os.path.exists(DEEPSEEK_CONFIG_PATH):
         print(f"[FATAL] 找不到 DeepSeek 配置文件: {DEEPSEEK_CONFIG_PATH}")
         print("请创建该文件，内容示例：")
@@ -72,18 +67,10 @@ def load_deepseek_config() -> Tuple[str, str]:
     if not api_key:
         print("[FATAL] DeepSeek 配置文件中缺少 api_key")
         sys.exit(1)
-    # base_url 优先使用配置文件中的，否则用全局常量
     base_url = config.get("base_url", "").strip() or DEEPSEEK_BASE_URL
     return api_key, base_url
 
-# ==================== 模型选择与提示词工厂 ====================
 def select_model(impact_score: float, text_length: int) -> str:
-    """
-    根据视频价值分数与文本长度的乘积（对数平滑）动态选择模型
-    impact_score: 来自 CIF 认知影响因子，假设为0-10的数值
-    text_length: 字幕总字符数
-    """
-    # 计算对数平滑值，避免极长文本的乘积爆炸
     try:
         log_len = math.log(text_length + 1)
     except ValueError:
@@ -95,11 +82,6 @@ def select_model(impact_score: float, text_length: int) -> str:
 
 def build_prompt(text: str, title: str, description: str, tags: list,
                  text_length: int, chosen_model: str) -> Tuple[str, str, int]:
-    """
-    根据文本长度动态选择总结策略，并适配模型上下文窗口
-    返回：(system_prompt, user_content, max_tokens)
-    """
-    # 1. 选择总结模式与长度指引
     if text_length <= 1500:
         mode = "short_summary"
         length_guideline = "100-200字，只保留最核心的观点与结论。"
@@ -113,13 +95,11 @@ def build_prompt(text: str, title: str, description: str, tags: list,
         length_guideline = "不少于800字，采用结构化格式（如：背景-问题-分析-结论），充分保留知识颗粒度。"
         max_tokens = 4000
 
-    # 2. 动态截取字幕（保留头部，避免丢失关键信息，尾部信息量通常较低但保留完整性）
     truncated_text = text[:MAX_INPUT_CHARS]
     if len(text) > MAX_INPUT_CHARS:
         trunc_note = f"\n[注意：原字幕总长{len(text)}字，已截取前{MAX_INPUT_CHARS}字进行总结。]"
         truncated_text += trunc_note
 
-    # 3. 系统角色设定
     system_prompt = (
         "你是一个顶级的知识蒸馏专家，擅长从视频文稿中提取高密度认知内容。\n"
         "请严格遵守以下规则：\n"
@@ -128,7 +108,6 @@ def build_prompt(text: str, title: str, description: str, tags: list,
         "3. 使用中文输出，保持专业且平实的语气。\n"
     )
 
-    # 4. 用户任务描述
     user_content = f"""
 视频标题：{title}
 视频简介：{description}
@@ -153,11 +132,9 @@ def build_prompt(text: str, title: str, description: str, tags: list,
 """
     return system_prompt, user_content, max_tokens
 
-# ==================== DeepSeek 调用封装 ====================
 async def call_deepseek(api_key: str, base_url: str, model: str,
                         system: str, user: str, max_tokens: int,
                         temperature: float = 0.3, retry: int = 3) -> Optional[dict]:
-    """异步调用 DeepSeek，自动重试与限流处理"""
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     for attempt in range(retry):
         try:
@@ -169,7 +146,7 @@ async def call_deepseek(api_key: str, base_url: str, model: str,
                 ],
                 temperature=temperature,
                 max_tokens=max_tokens,
-                response_format={"type": "json_object"}  # 启用 JSON 模式
+                response_format={"type": "json_object"}
             )
             content = response.choices[0].message.content
             return json.loads(content)
@@ -180,28 +157,43 @@ async def call_deepseek(api_key: str, base_url: str, model: str,
             err_msg = str(e).lower()
             print(f"  [ERROR] API异常: {e}")
             if "rate" in err_msg or "429" in err_msg:
-                # 速率限制，长休眠
                 sleep_time = 10 * (attempt + 1)
                 print(f"  [RATE] 触发限流，休眠 {sleep_time} 秒...")
                 await asyncio.sleep(sleep_time)
             elif "context" in err_msg or "length" in err_msg:
-                # 上下文过长，不可恢复，直接返回空
                 print(f"  [FATAL] 输入超长，跳过此视频。")
                 return None
             else:
                 await asyncio.sleep(3 * (attempt + 1))
     return None
 
-# ==================== 单个视频处理任务 ====================
 async def process_summary(bvid: str, node: dict, progress_cache: dict,
                           semaphore: asyncio.Semaphore, start_time: float,
                           completed: list, lock: asyncio.Lock, total: int,
                           api_key: str, base_url: str):
     async with semaphore:
-        # 断点检查
+        # ===== 断点恢复检查 =====
         if bvid in progress_cache:
             return
 
+        # ===== 视频时长过滤 =====
+        metadata = node.get("metadata", {})
+        duration_sec = metadata.get("duration", 0)  # 单位：秒
+        try:
+            duration_sec = int(duration_sec)
+        except (ValueError, TypeError):
+            duration_sec = 0
+
+        if duration_sec < MIN_VIDEO_DURATION_SECONDS:
+            print(f"  [SKIP] {bvid} 时长不足1分钟 ({duration_sec}秒)，忽略。")
+            # 记录为已处理（避免重复检查）
+            progress_cache[bvid] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            safe_save_json(progress_cache, PROGRESS_FILE)
+            async with lock:
+                completed[0] += 1
+            return
+
+        # ===== 字幕文件存在性检查 =====
         subtitle_path = os.path.join(SUBTITLES_DIR, f"{bvid}.json")
         if not os.path.exists(subtitle_path):
             print(f"  [SKIP] {bvid} 无字幕文件")
@@ -223,32 +215,29 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
                 completed[0] += 1
             return
 
-        # 提取元数据与 CIF 影响因子
-        metadata = node.get("metadata", {})
+        # ===== 提取元数据 =====
         title = metadata.get("title", "")
         desc = metadata.get("description", "")
         tags = metadata.get("tags", [])
-        cif = node.get("cognitive_impact_factor", {})
-        # 尝试获取综合影响分数（根据实际CIF数据结构调整字段名）
-        impact_score = cif.get("impact_score", 5.0)   # 默认中等分数
+        cif = node.get("cognitive_impact_factor", 5.0)
+        if isinstance(cif, dict):
+            impact_score = float(cif.get("impact_score", 5.0))
+        else:
+            impact_score = float(cif)
         try:
             impact_score = float(impact_score)
         except (ValueError, TypeError):
             impact_score = 5.0
 
         text_len = len(full_text)
-
-        # 动态选择模型
         chosen_model = select_model(impact_score, text_len)
         print(f"\n[Stage3] 处理: {bvid} | {title[:20]}... "
-              f"(字数:{text_len}, CIF:{impact_score:.1f}, 模型:{chosen_model})")
+              f"(时长:{duration_sec}s, 字数:{text_len}, CIF:{impact_score:.1f}, 模型:{chosen_model})")
 
-        # 构建提示词并获取最大输出token数
+        # 构建提示词并调用
         system_prompt, user_prompt, max_tok = build_prompt(
             full_text, title, desc, tags, text_len, chosen_model
         )
-
-        # 调用大模型
         ai_result = await call_deepseek(api_key, base_url, chosen_model,
                                         system_prompt, user_prompt, max_tok)
 
@@ -262,7 +251,7 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
                 "is_ad_contaminated": False
             }
 
-        # 组装最终知识颗粒
+        # 输出最终知识颗粒
         knowledge_grain = {
             "video_id": bvid,
             "metadata": metadata,
@@ -282,11 +271,11 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
         out_path = os.path.join(STAGE3_DIR, f"{bvid}.json")
         safe_save_json(knowledge_grain, out_path)
 
-        # 保存断点
+        # 更新进度
         progress_cache[bvid] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         safe_save_json(progress_cache, PROGRESS_FILE)
 
-        # 进度报告与预估
+        # 进度报告
         async with lock:
             completed[0] += 1
             elapsed = time.time() - start_time
@@ -295,16 +284,13 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
             pct = (completed[0] / total) * 100
             print(f"  [PROG] {completed[0]}/{total} ({pct:.1f}%) | 预计剩余: {remaining/60:.1f}分钟")
 
-        # API 调用间隔，防止触发限流
+        # API 安全休眠
         await asyncio.sleep(random.uniform(5.0, 12.0))
 
-# ==================== 主入口 ====================
 async def main():
-    # 加载 DeepSeek 密钥
     api_key, base_url = load_deepseek_config()
     print(f"[CONFIG] DeepSeek base_url: {base_url}")
 
-    # 读取 stage1 的 CIF 主表
     INPUT_FILE = os.path.join(DATA_DIR, "stage1_enrich", "master_enriched.json")
     if not os.path.exists(INPUT_FILE):
         print(f"[ERROR] 找不到提纯表: {INPUT_FILE}")
@@ -315,31 +301,35 @@ async def main():
 
     progress_cache = load_progress()
 
-    # 筛选待处理视频（已提取有效字幕且未完成总结）
+    # 筛选待处理视频：跳过已完成、无字幕或字幕为空的，同时过滤掉短视频（在 process_summary 中处理）
     pending_items = []
     for bvid, node in master_enriched.items():
         if bvid in progress_cache:
             continue
+        # 可以提前做一次时长过滤以减少后续检查，但为了日志清晰，我们仍保留函数内部检查；
+        # 这里可以快速跳过无字幕的，避免无用遍历
         sub_path = os.path.join(SUBTITLES_DIR, f"{bvid}.json")
         if not os.path.exists(sub_path):
+            # 无字幕文件，直接标记为跳过（可选）
             continue
         try:
             with open(sub_path, 'r', encoding='utf-8') as f:
                 sub_json = json.load(f)
-            if sub_json.get("full_text", "").strip():
-                pending_items.append((bvid, node))
+            if not sub_json.get("full_text", "").strip():
+                continue
         except:
-            pass
+            continue
+        pending_items.append((bvid, node))
 
     if DEBUG_MODE:
         pending_items = pending_items[:DEBUG_ITEM_LIMIT]
 
     if not pending_items:
-        print("[INFO] 所有视频总结已完成，无增量任务。")
+        print("[INFO] 所有视频总结已完成或无待处理任务。")
         return
 
-    print(f"\n[STAGE 3] 将处理 {len(pending_items)} 个视频（模型策略：按 CIF×log 动态选择）")
-    print(f"[MODEL] 标准模型: {MODEL_SMALL} | 增强模型: {MODEL_LARGE} | 阈值: {HIGH_VALUE_THRESHOLD}")
+    print(f"\n[STAGE 3] 将处理 {len(pending_items)} 个视频（跳过时长<{MIN_VIDEO_DURATION_SECONDS}s的视频）")
+    print(f"[MODEL] 标准: {MODEL_SMALL} | 增强: {MODEL_LARGE} | 阈值: {HIGH_VALUE_THRESHOLD}")
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     start_time = time.time()
