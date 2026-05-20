@@ -16,10 +16,13 @@ PIPELINE_CONFIG = {
     "ENABLE_LOCAL_WHISPER": False,
     "WHISPER_MODEL_SIZE": "small",
     # ---------- 阶段三专属配置 ----------
-    "ENABLE_STAGE3": False,                        # 是否启用第三阶段总结
-    "MIN_VIDEO_DURATION_SECONDS": 60,             # 过滤小于60秒的视频
+    "ENABLE_STAGE3": True,                        # 是否启用第三阶段总结
+    "MIN_VIDEO_DURATION_SECONDS": 120,             # 过滤小于60秒的视频
     "DEEPSEEK_HIGH_VALUE_THRESHOLD": 6.0,        # 模型选择阈值
-    "STAGE3_CONCURRENCY_LIMIT": 1                 # 可单独设置总结并发（一般与全局一致）
+    "STAGE3_CONCURRENCY_LIMIT": 1,                 # 可单独设置总结并发（一般与全局一致）
+    
+    "PARALLEL_STAGE2_3": True,        # 是否并行运行阶段2和阶段3
+    "STAGE3_POLL_INTERVAL": 30,       # Stage3轮询间隔（秒）
 }
 
 # 导入四个子模块（新增 stage3_summarizer）
@@ -47,23 +50,47 @@ async def run_pipeline(stage_to_run):
         stage1_enrich_cif.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
         await stage1_enrich_cif.main()
 
-    if stage_to_run in ['all', '2']:
-        print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
+    # ========== 阶段 2 和 3 ==========
+    if stage_to_run in ['all', '2', '3'] and PIPELINE_CONFIG.get("ENABLE_STAGE3", False):
+        # 配置注入（原有）
         stage2_subtitle_extractor.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage2_subtitle_extractor.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
         stage2_subtitle_extractor.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
         stage2_subtitle_extractor.ENABLE_LOCAL_WHISPER = PIPELINE_CONFIG["ENABLE_LOCAL_WHISPER"]
         stage2_subtitle_extractor.WHISPER_MODEL_SIZE = PIPELINE_CONFIG["WHISPER_MODEL_SIZE"]
-        await stage2_subtitle_extractor.main()
 
-    if stage_to_run in ['all', '3'] and PIPELINE_CONFIG["ENABLE_STAGE3"]:
-        print("\n>>> [执行阶段 3] 启动 AI 深度认知蒸馏 (DeepSeek)...")
         stage3_summarizer.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage3_summarizer.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
         stage3_summarizer.CONCURRENCY_LIMIT = PIPELINE_CONFIG["STAGE3_CONCURRENCY_LIMIT"]
         stage3_summarizer.MIN_VIDEO_DURATION_SECONDS = PIPELINE_CONFIG["MIN_VIDEO_DURATION_SECONDS"]
         stage3_summarizer.HIGH_VALUE_THRESHOLD = PIPELINE_CONFIG["DEEPSEEK_HIGH_VALUE_THRESHOLD"]
-        await stage3_summarizer.main()
+        stage3_summarizer.POLL_INTERVAL = PIPELINE_CONFIG.get("STAGE3_POLL_INTERVAL", 30)
+
+        if stage_to_run == 'all' and PIPELINE_CONFIG.get("PARALLEL_STAGE2_3", True):
+            # ---- 并行模式 ----
+            print("\n>>> [并行模式] 同时启动阶段2（字幕提取）与阶段3（AI总结）...")
+            stage2_done = asyncio.Event()
+            await asyncio.gather(
+                stage2_subtitle_extractor.main_parallel(stage2_done),
+                stage3_summarizer.main_parallel(stage2_done)
+            )
+        else:
+            # ---- 串行模式（保持原有行为）----
+            if stage_to_run in ['all', '2']:
+                print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
+                await stage2_subtitle_extractor.main()
+            if stage_to_run in ['all', '3']:
+                print("\n>>> [执行阶段 3] 启动 AI 深度认知蒸馏 (DeepSeek)...")
+                await stage3_summarizer.main()
+    elif stage_to_run in ['all', '2']:
+        # 如果 ENABLE_STAGE3 为 False 但选择了 all/2，仍然执行 stage2
+        stage2_subtitle_extractor.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
+        stage2_subtitle_extractor.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
+        stage2_subtitle_extractor.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
+        stage2_subtitle_extractor.ENABLE_LOCAL_WHISPER = PIPELINE_CONFIG["ENABLE_LOCAL_WHISPER"]
+        stage2_subtitle_extractor.WHISPER_MODEL_SIZE = PIPELINE_CONFIG["WHISPER_MODEL_SIZE"]
+        print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
+        await stage2_subtitle_extractor.main()
 
     print("\n" + "="*70)
     print(" 🎉 [ALL DONE] Mirror 蒸馏管线指定任务执行完毕！")

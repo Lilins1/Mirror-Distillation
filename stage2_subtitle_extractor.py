@@ -172,6 +172,7 @@ async def process_node(cred: Credential, bvid: str, node: dict, progress_cache: 
         
         await asyncio.sleep(random.uniform(2.0, 4.0))
         # 1：优先白嫖 B 站官方 AI 视频总结
+        cid = None   # 提前声明，避免未定义
         try:
             info = await v.get_info()
             cid = info.get('cid')
@@ -201,7 +202,7 @@ async def process_node(cred: Credential, bvid: str, node: dict, progress_cache: 
 
         await asyncio.sleep(random.uniform(2.5, 5.0))
         # 2：如果没有 AI 总结，尝试获取官方字幕并过滤广告
-        if not has_data:
+        if not has_data and cid is not None:          # 确保 cid 已获取
             try:
                 subs_list = await v.get_subtitle(cid)
                 if subs_list and subs_list.get('subtitles'):
@@ -274,7 +275,8 @@ async def process_node(cred: Credential, bvid: str, node: dict, progress_cache: 
         print(f"  [SLEEP] 安全休眠 {delay:.1f} 秒...")
         await asyncio.sleep(delay)
 
-async def main():
+async def _run_extraction():
+    """字幕提取核心逻辑（无参数，直接使用模块级配置）"""
     if not os.path.exists(INPUT_FILE):
         print(f"[ERROR] 找不到提纯表: {INPUT_FILE}")
         return
@@ -283,34 +285,29 @@ async def main():
     progress_cache = load_progress()
     
     cred = await get_guest_cookies()
-    # =========================================================
-    # 【核心新增】精准过滤机制：跳过“音乐”类视频，且不计入进度
-    # =========================================================
+    
+    # 过滤音乐类视频
     pending_items = []
     skip_count = 0
-    
     for bvid, node in master_enriched.items():
-        # 如果已经提取过，直接跳过
         if bvid in progress_cache:
             continue
-            
-        # 提取标签列表
         tags = node.get("metadata", {}).get("tags", [])
-        
-        # 只要任意一个 tag 中包含“音乐”二字，直接抛弃
         if any("音乐" in str(tag) for tag in tags):
             skip_count += 1
             continue
-            
         pending_items.append((bvid, node))
-
+    
     if skip_count > 0:
         print(f"\n[FILTER] 自动净化：已拦截并跳过 {skip_count} 个包含“音乐”标签的视频（未计入处理额度）。")
-    # =========================================================
-    if DEBUG_MODE: pending_items = pending_items[:DEBUG_ITEM_LIMIT]
+    
+    if DEBUG_MODE:
+        pending_items = pending_items[:DEBUG_ITEM_LIMIT]
+    
     if not pending_items:
         print("\n[INFO] 所有高优视频均已处理完毕，暂无增量任务。")
         return
+    
     print(f"\n[STAGE 2] 开始处理 {len(pending_items)} 个视频的多模态抽取...")
     print(f"[INFO] 已开启【AI总结优先】降维打击策略，最大化降低风控概率！")
     if ENABLE_SPONSOR_BLOCK:
@@ -318,20 +315,34 @@ async def main():
         print(f"[INFO] 状态说明: success=有广告 | no_segments=无广告 | api_error=调用失败 | network_error=网络问题")
     
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    
-    # 新增：进度统计相关变量
     start_time = time.time()
-    completed = [0]  # 使用列表实现可变整数，支持异步修改
+    completed = [0]
     progress_lock = asyncio.Lock()
     total_pending = len(pending_items)
     
-    tasks = [process_node(cred, bvid, node, progress_cache, semaphore, start_time, completed, progress_lock, total_pending) for bvid, node in pending_items]
+    tasks = [
+        process_node(cred, bvid, node, progress_cache, semaphore,
+                     start_time, completed, progress_lock, total_pending)
+        for bvid, node in pending_items
+    ]
     await asyncio.gather(*tasks)
+    
+    total_elapsed = (time.time() - start_time) / 60
     print(f"\n[SUCCESS] 第 2 阶段抽取完毕！")
     print(f"[-] 输出目录: {SUBTITLES_DIR}/")
-    # 新增：最终统计
-    total_elapsed = (time.time() - start_time) / 60
     print(f"[-] 总用时: {total_elapsed:.1f}分钟 | 平均每个视频用时: {total_elapsed/total_pending:.1f}分钟")
+
+
+async def main():
+    """串行/独立模式入口（保持原有接口不变）"""
+    await _run_extraction()
+
+
+async def main_parallel(done_event: asyncio.Event = None):
+    """并行模式入口：执行提取任务，完成后设置事件通知 Stage3"""
+    await _run_extraction()
+    if done_event:
+        done_event.set()
 
 if __name__ == '__main__':
     if sys.platform == 'win32':
