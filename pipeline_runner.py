@@ -50,7 +50,7 @@ async def run_pipeline(stage_to_run):
     print("="*70)
 
     # ---------- Stage 1: Collector ----------
-    if stage_to_run in ['all', '1']:
+    if stage_to_run in ['all', 'daily', '1']:
         print("\n>>> [执行阶段 1] 启动历史数据增量采集...")
         stage1_collector.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage1_collector.DEBUG_MAX_PAGES = PIPELINE_CONFIG["DEBUG_MAX_PAGES"]
@@ -58,7 +58,7 @@ async def run_pipeline(stage_to_run):
         await stage1_collector.main()
 
     # ---------- Stage 1.5: Enrich CIF ----------
-    if stage_to_run in ['all', '1.5']:
+    if stage_to_run in ['all', 'daily', '1.5']:
         print("\n>>> [执行阶段 1.5] 启动多维数据提纯与 CIF 赋权...")
         stage1_enrich_cif.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage1_enrich_cif.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
@@ -66,7 +66,7 @@ async def run_pipeline(stage_to_run):
         await stage1_enrich_cif.main()
 
     # ---------- Stage 2 & 3: Extraction & Summarization ----------
-    if stage_to_run in ['all', '2', '3']:
+    if stage_to_run in ['all', 'daily', '2', '3']:
         # 配置注入 Stage2
         stage2_subtitle_extractor.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage2_subtitle_extractor.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
@@ -83,7 +83,7 @@ async def run_pipeline(stage_to_run):
             stage3_summarizer.POLL_INTERVAL = PIPELINE_CONFIG.get("STAGE3_POLL_INTERVAL", 30)
 
         # 根据 ENABLE_STAGE3 和并行设置决定执行模式
-        if PIPELINE_CONFIG["ENABLE_STAGE3"] and stage_to_run == 'all' and PIPELINE_CONFIG.get("PARALLEL_STAGE2_3", True):
+        if PIPELINE_CONFIG["ENABLE_STAGE3"] and stage_to_run in ['all', 'daily'] and PIPELINE_CONFIG.get("PARALLEL_STAGE2_3", True):
             # ---- 并行模式 ----
             print("\n>>> [并行模式] 同时启动阶段2（字幕提取）与阶段3（AI总结）...")
             stage2_done = asyncio.Event()
@@ -93,10 +93,10 @@ async def run_pipeline(stage_to_run):
             )
         else:
             # ---- 串行模式 ----
-            if stage_to_run in ['all', '2']:
+            if stage_to_run in ['all', 'daily', '2']:
                 print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
                 await stage2_subtitle_extractor.main()
-            if stage_to_run in ['all', '3'] and PIPELINE_CONFIG["ENABLE_STAGE3"]:
+            if stage_to_run in ['all', 'daily', '3'] and PIPELINE_CONFIG["ENABLE_STAGE3"]:
                 print("\n>>> [执行阶段 3] 启动 AI 深度认知蒸馏 (DeepSeek)...")
                 await stage3_summarizer.main()
 
@@ -119,13 +119,14 @@ async def run_pipeline(stage_to_run):
 
     print("\n" + "="*70)
     print(" 🎉 [ALL DONE] Mirror 蒸馏管线指定任务执行完毕！")
-    if PIPELINE_CONFIG["ENABLE_STAGE5"]:
+    if PIPELINE_CONFIG["ENABLE_STAGE5"] and stage_to_run in ['all', '5']:
         print(f" 📂 最终认知镜像: {PIPELINE_CONFIG['SKILL_MD_PATH']}")
     print("="*70)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Mirror 蒸馏认知管线总控台")
-    parser.add_argument('--stage', type=str, choices=['all', '1', '1.5', '2', '3', '4', '5'], default='all',
+    # ✅ 在 choices 中新增了 'daily' 选项
+    parser.add_argument('--stage', type=str, choices=['all', 'daily', '1', '1.5', '2', '3', '4', '5'], default='all',
                         help="选择要执行的流水线阶段 (默认: all)")
     parser.add_argument('--debug', action='store_true',
                         help="挂载此标志以激活全局 DEBUG 测试模式")

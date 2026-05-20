@@ -3,9 +3,10 @@ import sys
 import json
 import random
 import asyncio
-import time  # 新增：用于计算时间
-from datetime import datetime
+import httpx
 import qrcode
+import time  # 用于计算时间
+from datetime import datetime
 from bilibili_api import Credential, video 
 
 DATA_DIR = "data"
@@ -27,19 +28,60 @@ ENABLE_SPONSOR_BLOCK = True
 SPONSOR_BLOCK_CATEGORIES = ["sponsor", "selfpromo", "interaction"]
 
 # ==========================================
-# 权限隔离逻辑
+# 引入大号的 UA 伪装池 (防风控必备)
+# ==========================================
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+]
+def get_random_ua(): return random.choice(USER_AGENTS)
+
+# ==========================================
+# 权限隔离逻辑 (已完全替换为 Stage 1 的原生机制)
 # ==========================================
 async def raw_qr_login_guest():
     print("\n" + "="*50)
-    print("[权限隔离] 正在请求【小号】安全凭证...")
-    from bilibili_api import login
-    try:
-        cred = await login.login_with_qrcode()
-        print("\n[AUTH] 小号扫码成功！")
-        return cred
-    except Exception as e:
-        print(f"\n[AUTH 失败] 二维码获取异常: {e}")
-        sys.exit(1)
+    print("[原生 Auth] 正在向 B 站请求【小号】安全登录凭证...")
+    headers = {"User-Agent": get_random_ua()}
+    
+    async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
+        # 先获取基础的 buvid3 (参考大号逻辑)
+        init_resp = await client.get("https://www.bilibili.com")
+        buvid3 = init_resp.cookies.get("buvid3", "")
+        
+        # 原生请求扫码接口
+        resp = await client.get("https://passport.bilibili.com/x/passport-login/web/qrcode/generate")
+        data = resp.json()['data']
+        qr_url = data['url']
+        qrcode_key = data['qrcode_key']
+        
+        # 在终端渲染二维码
+        qr = qrcode.QRCode()
+        qr.add_data(qr_url)
+        qr.print_ascii(invert=True) 
+        
+        print("="*50)
+        print("[AUTH 降级] 请打开手机 Bilibili App，扫描上方二维码登录小号！")
+        print("="*50)
+        
+        # 轮询扫码状态
+        while True:
+            await asyncio.sleep(2)
+            poll_resp = await client.get(f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}")
+            poll_data = poll_resp.json()['data']
+            code = poll_data['code']
+            
+            if code == 0:
+                print("\n[AUTH] 小号扫码确认成功！")
+                cookies = poll_resp.cookies
+                return Credential(sessdata=cookies.get("SESSDATA"), bili_jct=cookies.get("bili_jct"), buvid3=buvid3)
+            elif code == 86038:
+                print("\n[AUTH 失败] 二维码已过期，请重新运行脚本。")
+                sys.exit(1)
+            elif code == 86090:
+                print("[-] 手机已扫码，请在手机端点击确认登录...")
 
 async def get_guest_cookies():
     if os.path.exists(GUEST_CREDENTIAL_PATH):
@@ -56,7 +98,9 @@ async def get_guest_cookies():
         json.dump({"sessdata": cred.sessdata, "bili_jct": cred.bili_jct, "buvid3": cred.buvid3}, f, indent=4)
     return cred
 
-# 修复：统一参数顺序为 (data, filepath)，与所有其他文件保持一致
+# ==========================================
+# 工具函数
+# ==========================================
 def safe_save_json(data, filepath):
     tmp_path = filepath + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
@@ -71,24 +115,13 @@ def load_progress():
     return {}
 
 # ==========================================
-# SponsorBlock 广告清洗核心函数（支持精准状态区分）
+# SponsorBlock 广告清洗核心函数
 # ==========================================
 async def get_sponsor_segments(bvid: str) -> tuple[list, str, str]:
-    """
-    从SponsorBlock API获取视频的广告片段时间戳
-    返回值：(segments列表, 状态码, 详细信息)
-    状态码：
-    - "success": 调用成功且找到广告片段
-    - "no_segments": 调用成功但无任何匹配的广告标记
-    - "api_error": API返回非200/404状态码
-    - "network_error": 网络连接失败/超时
-    - "disabled": 功能被全局关闭
-    """
     if not ENABLE_SPONSOR_BLOCK:
         return [], "disabled", "SponsorBlock广告清洗功能已全局关闭"
     
     try:
-        import httpx
         categories = ",".join(f'"{cat}"' for cat in SPONSOR_BLOCK_CATEGORIES)
         url = f"https://sponsor.ajay.app/api/skipSegments?videoID={bvid}&categories=[{categories}]"
         
@@ -123,7 +156,6 @@ async def get_sponsor_segments(bvid: str) -> tuple[list, str, str]:
         return [], "api_error", f"未知错误: {str(e)[:50]}"
 
 def filter_subtitle_by_segments(subtitle_body: list, segments: list) -> list:
-    """根据广告片段时间戳过滤字幕内容"""
     if not segments:
         return subtitle_body
     
@@ -132,7 +164,6 @@ def filter_subtitle_by_segments(subtitle_body: list, segments: list) -> list:
         start = item.get("from", 0)
         end = item.get("to", 0)
         
-        # 仅过滤完全落在广告片段内的字幕
         is_ad = False
         for seg in segments:
             if start >= seg["start"] and end <= seg["end"]:
@@ -209,7 +240,6 @@ async def process_node(cred: Credential, bvid: str, node: dict, progress_cache: 
                     sub_url = subs_list['subtitles'][0]['subtitle_url']
                     if sub_url.startswith("//"): sub_url = "https:" + sub_url
                     
-                    import httpx
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         sub_resp = await client.get(sub_url)
                         if sub_resp.status_code == 200:
