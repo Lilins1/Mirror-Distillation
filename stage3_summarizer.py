@@ -308,8 +308,9 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
         use_segmented = (ENABLE_SEGMENTED_SUMMARY and text_len > SEGMENT_CHUNK_SIZE)
 
         if use_segmented:
+            score_metric = impact_score * math.log(text_len + 1) if text_len > 0 else 0
             print(f"\n[Stage3-SEG] 超长视频: {bvid} | {title[:20]}... "
-                  f"(时长:{duration_sec}s, 字数:{text_len}, CIF:{impact_score:.1f})")
+                f"(时长:{duration_sec}s, 字数:{text_len}, CIF:{impact_score:.1f}, score_metric:{score_metric:.1f})")
             print(f"  [SEGMENT] 启用分段总结，每段上限 {SEGMENT_CHUNK_SIZE} 字符")
 
             # 1. 分段
@@ -410,8 +411,9 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
         else:
             # ===== 常规单次总结（或未启用分段） =====
             chosen_model = select_model(impact_score, text_len)
+            score_metric = impact_score * math.log(text_len + 1) if text_len > 0 else 0
             print(f"\n[Stage3] 处理: {bvid} | {title[:20]}... "
-                  f"(时长:{duration_sec}s, 字数:{text_len}, CIF:{impact_score:.1f}, 模型:{chosen_model})")
+                f"(时长:{duration_sec}s, 字数:{text_len}, CIF:{impact_score:.1f}, score_metric:{score_metric:.1f}, 模型:{chosen_model})")
 
             system_prompt, user_prompt, max_tok = build_prompt(
                 full_text, title, desc, tags, text_len, chosen_model,
