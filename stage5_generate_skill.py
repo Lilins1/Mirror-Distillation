@@ -189,7 +189,7 @@ async def generate_skill_markdown(
         client,
         system_prompt,
         user_prompt,
-        max_tokens=5000,
+        max_tokens=32000,
         temperature=0.2,
     )
     if not raw_content:
