@@ -129,7 +129,10 @@ def build_prompt(text: str, title: str, description: str, tags: list,
     )
     if enable_cognitive:
         system_prompt += (
-            "2. 如果文本中能反映出说话者的思维特征，请提取认知画像；若证据不足，务必注明 'insufficient_data'，严禁编造。\n"
+            "2. 提取说话者的认知特征时，必须遵循：\n"
+            "   - 仅使用原文中明确体现的证据，严禁任何推测或编造。\n"
+            "   - 描述必须客观、精准，避免使用主观形容词（如“激昂”“冷峻”）。若文本中无情绪词，应写“无明显情绪倾向”。\n"
+            "   - 每个维度如果缺乏足够的直接证据，请严格填写 'insufficient_data'，不要根据标题或背景强行猜测。\n"
         )
     else:
         system_prompt += "2. 文本较短或认知信号弱，无需提取认知特征。\n"
@@ -164,14 +167,14 @@ def build_prompt(text: str, title: str, description: str, tags: list,
         user_prompt += """,
   "cognitive_signal_strength": 1-10的整数，评估文本在多大程度上体现了说话者的个人认知风格（1=完全无法推断，10=极其明显）,
   "cognitive_profile": {{
-    "language_style": "描述语言风格（词汇、句式、口头禅等）；若无法推断则填 'insufficient_data'",
-    "thinking_mode": "归纳思维方式（演绎/归纳、抽象/具象等）；若无法推断则填 'insufficient_data'",
-    "values_preferences": "显性或隐性的价值观与偏好；若无法推断则填 'insufficient_data'",
-    "core_beliefs": "视频中透露的底层信念或世界观；若无法推断则填 'insufficient_data'",
-    "argumentation_pattern": "典型论证结构（举例→结论、破立结合等）；若无法推断则填 'insufficient_data'",
-    "emotional_tone": "情绪基调（冷静/激昂/批判/幽默等）；若无法推断则填 'insufficient_data'",
-    "knowledge_framework": "引用的学科、模型、概念框架；若无法推断则填 'insufficient_data'",
-    "decision_pattern": "决策或给出建议时的权衡特点；若无法推断则填 'insufficient_data'"
+    "language_style": "仅基于原文中的词汇、句式和修辞特点描述；若无法判断则填 'insufficient_data'",
+    "thinking_mode": "仅基于原文的推理方式（如归纳、类比、层层递进等）描述；若无法判断则填 'insufficient_data'",
+    "values_preferences": "仅基于原文中明确表达的偏好或原则描述；若无法判断则填 'insufficient_data'",
+    "core_beliefs": "仅基于原文中反复出现的底层观点或世界观描述；若无法判断则填 'insufficient_data'",
+    "argumentation_pattern": "仅基于原文的论证结构（如举例→结论、先破后立）描述；若无法判断则填 'insufficient_data'",
+    "emotional_tone": "仅基于原文中出现的情绪词或语气描述（如愤怒、讽刺），避免主观推断；若无明显情绪则写 '无明显情绪倾向'，无法确定则填 'insufficient_data'",
+    "knowledge_framework": "仅基于原文引用的学科、概念或模型描述；若无法判断则填 'insufficient_data'",
+    "decision_pattern": "仅基于原文中明确给出的决策逻辑或建议方式描述；若无法判断则填 'insufficient_data'"
   }}
 """
     user_prompt += "\n}"
@@ -359,10 +362,13 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
                 "请基于提供的视频分段摘要，整合成一份完整的总结。\n"
             )
             if final_enable_cognitive:
-                final_sys += "如果摘要中能反映说话者的思维特征，请提取认知画像；若证据不足，务必标注 'insufficient_data'。\n"
+                final_sys += (
+                    "如果摘要中能反映说话者的思维特征，请提取认知画像。"
+                    "必须客观、精准，仅基于摘要中的直接证据，不得推测。"
+                    "每个维度若缺乏足够证据，必须填写 'insufficient_data'，严禁编造。\n"
+                )
             else:
                 final_sys += "由于原始信号弱，无需提取认知特征。\n"
-            final_sys += "规则：仅基于提供的摘要内容，不要引入外部知识；过滤广告等无关信息；使用中文输出。\n"
 
             # 构建认知部分 JSON 片段
             cognitive_part = ""
