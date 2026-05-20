@@ -15,6 +15,7 @@ PIPELINE_CONFIG = {
     "ENABLE_SPONSOR_BLOCK": True,
     "ENABLE_LOCAL_WHISPER": False,
     "WHISPER_MODEL_SIZE": "small",
+    
     # ---------- 阶段三专属配置 ----------
     "ENABLE_STAGE3": True,                        # 是否启用第三阶段总结
     "MIN_VIDEO_DURATION_SECONDS": 120,             # 过滤小于60秒的视频
@@ -23,19 +24,29 @@ PIPELINE_CONFIG = {
     
     "PARALLEL_STAGE2_3": True,        # 是否并行运行阶段2和阶段3
     "STAGE3_POLL_INTERVAL": 30,       # Stage3轮询间隔（秒）
+
+    # ---------- 阶段四/五生成配置 ----------
+    "TOP_PERCENTILE": 0.9,           # Stage 4 选取高价值节点的比例
+    "PERSONA_DIR": os.path.join("data", "stage4_persona_builder"),
+    "SKILL_MD_PATH": os.path.join("data", "stage4_persona_builder", "SKILL.md")
 }
 
-# 导入四个子模块（新增 stage3_summarizer）
+# 导入所有子模块，确保文件名与磁盘一致
 import stage1_collector
 import stage1_enrich_cif
 import stage2_subtitle_extractor
-import stage3_summarizer      # 新增
+import stage3_summarizer
+import stage4_aggregate_to_nuwa
+import stage5_merge_research
+import stage5_generate_skill
+import stage5_quality_check
 
 async def run_pipeline(stage_to_run):
     print("="*70)
     print(" 🚀 [Mirror Distillation] 认知数字分身 - 数据流管线已启动")
     print("="*70)
 
+    # ---------- Stage 1: Collector ----------
     if stage_to_run in ['all', '1']:
         print("\n>>> [执行阶段 1] 启动历史数据增量采集...")
         stage1_collector.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
@@ -43,6 +54,7 @@ async def run_pipeline(stage_to_run):
         stage1_collector.PROD_MAX_PAGES = PIPELINE_CONFIG["PROD_MAX_PAGES"]
         await stage1_collector.main()
 
+    # ---------- Stage 1.5: Enrich CIF ----------
     if stage_to_run in ['all', '1.5']:
         print("\n>>> [执行阶段 1.5] 启动多维数据提纯与 CIF 赋权...")
         stage1_enrich_cif.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
@@ -50,14 +62,13 @@ async def run_pipeline(stage_to_run):
         stage1_enrich_cif.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
         await stage1_enrich_cif.main()
 
-    # ========== 阶段 2 和 3 ==========
-    if stage_to_run in ['all', '2', '3'] and PIPELINE_CONFIG.get("ENABLE_STAGE3", False):
-        # 配置注入（原有）
+    # ---------- Stage 2 & 3: Extraction & Summarization ----------
+    if stage_to_run in ['all', '2', '3']:
+        # 配置注入
         stage2_subtitle_extractor.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage2_subtitle_extractor.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
         stage2_subtitle_extractor.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
-        stage2_subtitle_extractor.ENABLE_LOCAL_WHISPER = PIPELINE_CONFIG["ENABLE_LOCAL_WHISPER"]
-        stage2_subtitle_extractor.WHISPER_MODEL_SIZE = PIPELINE_CONFIG["WHISPER_MODEL_SIZE"]
+        stage2_subtitle_extractor.ENABLE_SPONSOR_BLOCK = PIPELINE_CONFIG["ENABLE_SPONSOR_BLOCK"]
 
         stage3_summarizer.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
         stage3_summarizer.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
@@ -75,31 +86,40 @@ async def run_pipeline(stage_to_run):
                 stage3_summarizer.main_parallel(stage2_done)
             )
         else:
-            # ---- 串行模式（保持原有行为）----
+            # ---- 串行模式 ----
             if stage_to_run in ['all', '2']:
                 print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
                 await stage2_subtitle_extractor.main()
             if stage_to_run in ['all', '3']:
                 print("\n>>> [执行阶段 3] 启动 AI 深度认知蒸馏 (DeepSeek)...")
                 await stage3_summarizer.main()
-    elif stage_to_run in ['all', '2']:
-        # 如果 ENABLE_STAGE3 为 False 但选择了 all/2，仍然执行 stage2
-        stage2_subtitle_extractor.DEBUG_MODE = PIPELINE_CONFIG["DEBUG_MODE"]
-        stage2_subtitle_extractor.DEBUG_ITEM_LIMIT = PIPELINE_CONFIG["DEBUG_ITEM_LIMIT"]
-        stage2_subtitle_extractor.CONCURRENCY_LIMIT = PIPELINE_CONFIG["CONCURRENCY_LIMIT"]
-        stage2_subtitle_extractor.ENABLE_LOCAL_WHISPER = PIPELINE_CONFIG["ENABLE_LOCAL_WHISPER"]
-        stage2_subtitle_extractor.WHISPER_MODEL_SIZE = PIPELINE_CONFIG["WHISPER_MODEL_SIZE"]
-        print("\n>>> [执行阶段 2] 启动多模态字幕抽取与广告清洗...")
-        await stage2_subtitle_extractor.main()
+
+    # ---------- Stage 4: Aggregate to Nuwa ----------
+    if stage_to_run in ['all', '4']:
+        print("\n>>> [执行阶段 4] 启动数据变压器，生成 6 维认知报告...")
+        stage4_aggregate_to_nuwa.TOP_PERCENTILE = PIPELINE_CONFIG["TOP_PERCENTILE"]
+        await stage4_aggregate_to_nuwa.main()
+
+    # ---------- Stage 5: Skill Generation & Validation ----------
+    if stage_to_run in ['all', '5']:
+        print("\n>>> [执行阶段 5.1] 合并调研结果并进行 Review...")
+        # 调用合并逻辑
+        stage5_merge_research.run_merge(PIPELINE_CONFIG["PERSONA_DIR"])
+        
+        print("\n>>> [执行阶段 5.2] 调用 LLM 生成最终的 SKILL.md...")
+        await stage5_generate_skill.main()
+        
+        print("\n>>> [执行阶段 5.3] 启动自动化质量检测...")
+        stage5_quality_check.run_check(PIPELINE_CONFIG["SKILL_MD_PATH"])
 
     print("\n" + "="*70)
     print(" 🎉 [ALL DONE] Mirror 蒸馏管线指定任务执行完毕！")
-    print(" 📂 最终知识颗粒输出: data/stage3_summaries/")
+    print(f" 📂 最终认知镜像: {PIPELINE_CONFIG['SKILL_MD_PATH']}")
     print("="*70)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Mirror 蒸馏认知管线总控台")
-    parser.add_argument('--stage', type=str, choices=['all', '1', '1.5', '2', '3'], default='all',
+    parser.add_argument('--stage', type=str, choices=['all', '1', '1.5', '2', '3', '4', '5'], default='all',
                         help="选择要执行的流水线阶段 (默认: all)")
     parser.add_argument('--debug', action='store_true',
                         help="挂载此标志以激活全局 DEBUG 测试模式")
@@ -117,3 +137,7 @@ if __name__ == '__main__':
         asyncio.run(run_pipeline(args.stage))
     except KeyboardInterrupt:
         print("\n[!] 收到终端中止信号，管线已紧急挂起。")
+    except Exception as e:
+        print(f"\n[FATAL] 管线运行异常: {e}")
+        import traceback
+        traceback.print_exc()
