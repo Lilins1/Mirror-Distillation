@@ -33,6 +33,31 @@ USER_AGENTS = [
 ]
 def get_random_ua(): return random.choice(USER_AGENTS)
 
+# ==========================================
+# 🚀 新增：跨平台异步弹窗函数
+# ==========================================
+def _show_msgbox():
+    """跨平台弹窗函数（在独立线程运行，不阻塞主程序）"""
+    import platform
+    msg = "【Mirror 蒸馏后台管线】\n\n大号(主账号)历史记录采集凭证已过期/失效。\n请使用 Bilibili App 扫描刚刚弹出的二维码图片！\n\n（扫码确认后后台会自动恢复运行，您可以直接关闭此提示框和图片）"
+    title = "⚠️ 需要扫码授权 (主账号)"
+    
+    if platform.system() == "Windows":
+        import ctypes
+        # 0x1000 = 置顶 (System Modal), 0x40 = 信息图标
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x1000 | 0x40)
+    else:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw() # 隐藏主窗口
+            root.attributes('-topmost', True) # 置顶
+            messagebox.showinfo(title, msg, parent=root)
+            root.destroy()
+        except:
+            pass
+
 async def raw_qr_login():
     print("\n" + "="*50)
     print("[原生 Auth] 正在向 B 站请求安全登录凭证...")
@@ -51,6 +76,34 @@ async def raw_qr_login():
         qr.add_data(qr_url)
         qr.print_ascii(invert=True) 
         
+        # ==========================================
+        # 🚀 新增：生成图片并跨平台弹窗提醒
+        # ==========================================
+        qr_img_path = None
+        try:
+            img = qr.make_image(fill_color="black", back_color="white")
+            qr_img_path = os.path.join(ACCOUNT_DIR, "master_qr_temp.png")
+            img.save(qr_img_path)
+            
+            import platform
+            import subprocess
+            system = platform.system()
+            
+            # 1. 调用系统默认看图软件打开二维码
+            if system == "Windows":
+                os.startfile(qr_img_path)
+            elif system == "Darwin": # macOS
+                subprocess.run(["open", qr_img_path])
+            else: # Linux
+                subprocess.run(["xdg-open", qr_img_path])
+                
+            # 2. 丢入后台执行弹窗，防止 MessageBox 阻塞当前 async 循环
+            asyncio.get_event_loop().run_in_executor(None, _show_msgbox)
+            
+        except Exception as e:
+            print(f"[WARN] 自动弹窗展示失败: {e}。请确保已执行 pip install pillow")
+        # ==========================================
+        
         print("="*50)
         print("[AUTH 降级] 请打开手机 Bilibili App，扫描上方二维码！")
         print("="*50)
@@ -63,6 +116,14 @@ async def raw_qr_login():
             
             if code == 0:
                 print("\n[AUTH] 扫码确认成功！")
+                
+                # 扫码成功后，自动清理刚才生成的二维码图片
+                if qr_img_path and os.path.exists(qr_img_path):
+                    try:
+                        os.remove(qr_img_path)
+                    except:
+                        pass
+                        
                 cookies = poll_resp.cookies
                 return Credential(sessdata=cookies.get("SESSDATA"), bili_jct=cookies.get("bili_jct"), buvid3=buvid3)
             elif code == 86038:

@@ -39,7 +39,32 @@ USER_AGENTS = [
 def get_random_ua(): return random.choice(USER_AGENTS)
 
 # ==========================================
-# 权限隔离逻辑 (已完全替换为 Stage 1 的原生机制)
+# 🚀 跨平台异步弹窗函数 (小号专属)
+# ==========================================
+def _show_msgbox():
+    """跨平台弹窗函数（在独立线程运行，不阻塞主程序）"""
+    import platform
+    msg = "【Mirror 蒸馏后台管线】\n\n小号(Guest)字幕提取凭证已过期/失效。\n请使用 Bilibili App 扫描刚刚弹出的二维码图片！\n\n（扫码确认后后台会自动恢复运行，您可以直接关闭此提示框和图片）"
+    title = "⚠️ 需要扫码授权 (小号)"
+    
+    if platform.system() == "Windows":
+        import ctypes
+        # 0x1000 = 置顶 (System Modal), 0x40 = 信息图标
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x1000 | 0x40)
+    else:
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw() # 隐藏主窗口
+            root.attributes('-topmost', True) # 置顶
+            messagebox.showinfo(title, msg, parent=root)
+            root.destroy()
+        except:
+            pass
+
+# ==========================================
+# 权限隔离逻辑 (完全原生机制 + 后台弹窗)
 # ==========================================
 async def raw_qr_login_guest():
     print("\n" + "="*50)
@@ -57,10 +82,38 @@ async def raw_qr_login_guest():
         qr_url = data['url']
         qrcode_key = data['qrcode_key']
         
-        # 在终端渲染二维码
+        # 终端打印二维码 (方便在有控制台时调试)
         qr = qrcode.QRCode()
         qr.add_data(qr_url)
         qr.print_ascii(invert=True) 
+        
+        # ==========================================
+        # 生成图片并触发跨平台弹窗提醒
+        # ==========================================
+        qr_img_path = None
+        try:
+            img = qr.make_image(fill_color="black", back_color="white")
+            qr_img_path = os.path.join(ACCOUNT_DIR, "guest_qr_temp.png")
+            img.save(qr_img_path)
+            
+            import platform
+            import subprocess
+            system = platform.system()
+            
+            # 1. 调用系统默认看图软件打开二维码
+            if system == "Windows":
+                os.startfile(qr_img_path)
+            elif system == "Darwin": # macOS
+                subprocess.run(["open", qr_img_path])
+            else: # Linux
+                subprocess.run(["xdg-open", qr_img_path])
+                
+            # 2. 丢入后台执行弹窗，防止 MessageBox 阻塞当前 async 循环
+            asyncio.get_event_loop().run_in_executor(None, _show_msgbox)
+            
+        except Exception as e:
+            print(f"[WARN] 自动弹窗展示失败: {e}。请确保已执行 pip install pillow")
+        # ==========================================
         
         print("="*50)
         print("[AUTH 降级] 请打开手机 Bilibili App，扫描上方二维码登录小号！")
@@ -75,6 +128,14 @@ async def raw_qr_login_guest():
             
             if code == 0:
                 print("\n[AUTH] 小号扫码确认成功！")
+                
+                # 扫码成功后，自动清理刚才生成的二维码图片
+                if qr_img_path and os.path.exists(qr_img_path):
+                    try:
+                        os.remove(qr_img_path)
+                    except:
+                        pass
+                        
                 cookies = poll_resp.cookies
                 return Credential(sessdata=cookies.get("SESSDATA"), bili_jct=cookies.get("bili_jct"), buvid3=buvid3)
             elif code == 86038:
@@ -362,11 +423,9 @@ async def _run_extraction():
     print(f"[-] 输出目录: {SUBTITLES_DIR}/")
     print(f"[-] 总用时: {total_elapsed:.1f}分钟 | 平均每个视频用时: {total_elapsed/total_pending:.1f}分钟")
 
-
 async def main():
     """串行/独立模式入口（保持原有接口不变）"""
     await _run_extraction()
-
 
 async def main_parallel(done_event: asyncio.Event = None):
     """并行模式入口：执行提取任务，完成后设置事件通知 Stage3"""
