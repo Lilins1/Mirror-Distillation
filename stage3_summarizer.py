@@ -41,13 +41,12 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEEPSEEK_QUOTA_EXHAUSTED = False   # 全局余额耗尽标志
 
 # 模型选择阈值
-HIGH_VALUE_THRESHOLD = 6.0
+HIGH_VALUE_THRESHOLD = 20.0
 MODEL_SMALL = "deepseek-v4-flash"   # 分段摘要使用的小模型
 MODEL_LARGE = "deepseek-v4-pro"     # 最终融合或高价值视频使用的大模型
 
 # ==================== 认知画像提取阈值 ====================
-MIN_TEXT_LEN_FOR_COGNITIVE = 1500   # 最少字数才启动认知分析（避免强迫短视频/浅内容）
-MIN_CIF_FOR_COGNITIVE = 4.0         # 最低认知影响因子，低于此值不提取认知特征
+COGNITIVE_VALUE_THRESHOLD = 1.0 *  HIGH_VALUE_THRESHOLD   # 认知画像提取阈值
 
 # ==================== 工具函数 ====================
 def safe_save_json(data: dict, filepath: str):
@@ -95,8 +94,12 @@ def build_prompt(text: str, title: str, description: str, tags: list,
                  impact_score: float = 5.0) -> Tuple[str, str, int]:
     """动态生成提示词，根据长度和认知价值决定是否提取认知画像"""
     # 判断是否启用认知提取
-    enable_cognitive = (text_length >= MIN_TEXT_LEN_FOR_COGNITIVE and
-                        impact_score >= MIN_CIF_FOR_COGNITIVE)
+    try:
+        log_len = math.log(text_length + 1)
+    except ValueError:
+        log_len = 0.0
+    score_metric = impact_score * log_len
+    enable_cognitive = (score_metric >= COGNITIVE_VALUE_THRESHOLD)
 
     # 确定总结模式和长度要求
     if text_length <= 1500:
@@ -344,8 +347,12 @@ async def process_summary(bvid: str, node: dict, progress_cache: dict,
             # 3. 最终融合（动态加入认知提取）
             final_model = select_model(impact_score, len(merged_summary))
             # 根据原始视频参数判断是否提取认知
-            final_enable_cognitive = (text_len >= MIN_TEXT_LEN_FOR_COGNITIVE and
-                                      impact_score >= MIN_CIF_FOR_COGNITIVE)
+            try:
+                log_len = math.log(text_len + 1)
+            except ValueError:
+                log_len = 0.0
+            score_metric = impact_score * log_len
+            final_enable_cognitive = (score_metric >= COGNITIVE_VALUE_THRESHOLD)
 
             final_sys = (
                 "你是一个顶级的知识蒸馏专家与认知建模师。\n"
@@ -518,7 +525,7 @@ async def main():
         print(f"[SEGMENT] 分段总结已启用，分段上限: {SEGMENT_CHUNK_SIZE} 字符")
     else:
         print(f"[SEGMENT] 分段总结已关闭，超长文本将被截断至 {MAX_INPUT_CHARS} 字符")
-    print(f"[COGNITIVE] 认知提取条件：字数≥{MIN_TEXT_LEN_FOR_COGNITIVE} 且 CIF≥{MIN_CIF_FOR_COGNITIVE}")
+    print(f"[COGNITIVE] 认知提取条件：综合评分度量 (score_metric) ≥ {COGNITIVE_VALUE_THRESHOLD}")
 
     semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     start_time = time.time()

@@ -18,7 +18,7 @@ PIPELINE_CONFIG = {
     # ---------- 阶段三专属配置 ----------
     "ENABLE_STAGE3": True,                        # 是否启用第三阶段总结
     "MIN_VIDEO_DURATION_SECONDS": 120,             # 过滤小于60秒的视频
-    "DEEPSEEK_HIGH_VALUE_THRESHOLD": 6.0,        # 模型选择阈值
+    "DEEPSEEK_HIGH_VALUE_THRESHOLD": 20.0,        # 模型选择阈值
     "STAGE3_CONCURRENCY_LIMIT": 1,                 # 可单独设置总结并发（一般与全局一致）
     
     "PARALLEL_STAGE2_3": True,        # 是否并行运行阶段2和阶段3
