@@ -7,11 +7,12 @@ import argparse
 # 统一全局配置中心 (Central Configuration)
 # ==========================================
 PIPELINE_CONFIG = {
-    "DEBUG_MODE": True,               # 调试模式（覆盖所有子模块）
+    "DEBUG_MODE": False,               # 调试模式（覆盖所有子模块）
     "DEBUG_ITEM_LIMIT": 10,            # 测试模式下的处理上限 (提纯与字幕阶段)
     "DEBUG_MAX_PAGES": 2,              # 测试模式下抓取历史记录的页数
     "PROD_MAX_PAGES": 200,             # 正式抓取时的最大历史页数
     "CONCURRENCY_LIMIT": 1,            # 全局并发限制（防止触发412风控）
+    "ENABLE_SPONSOR_BLOCK": True,      # 开启SponsorBlock广告清洗
     "ENABLE_LOCAL_WHISPER": False,     # 字幕阶段：是否开启本地 ASR 极限兜底
     "WHISPER_MODEL_SIZE": "small"      # Whisper 模型精度 (tiny/base/small/medium/large)
 }
