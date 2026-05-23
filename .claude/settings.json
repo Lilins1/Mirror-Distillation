@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m scripts.test_up_api --uid 389145939 --videos 5)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('f:/Entertainment/Bilili_mirror_distill/scripts/up_persona.py','r',encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('f:/Entertainment/Bilili_mirror_distill/scripts/wbi.py','r',encoding='utf-8'\\).read\\(\\)\\); print\\('wbi.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('f:/Entertainment/Bilili_mirror_distill/scripts/up_persona.py','r',encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(Get-ChildItem \"data\\\\up_persona\\\\49815713\\\\subtitles\" -Filter \"*.json\")",
+      "Bash(Select-Object -First 5 Name, Length)",
+      "Bash(python -m scripts.test_up_api --pages 2)",
+      "PowerShell(conda activate mirror_distill)",
+      "PowerShell(python -c \"import httpx; print\\('ok'\\)\")",
+      "PowerShell(conda run -n mirror_distill python -c \"import httpx; print\\('ok'\\)\")",
+      "PowerShell(conda run -n mirror_distill python -m scripts.test_up_api --pages 2)"
+    ]
+  }
+}
