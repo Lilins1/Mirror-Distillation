@@ -195,22 +195,6 @@ async def test_up_videos(auth: BilibiliAuth, wbi: WbiSigner, mid: int, max_video
         return result
 
 
-async def test_infer_domain(videos: dict):
-    """测试 7: 领域推断"""
-    print("\n" + "=" * 60)
-    print("测试 7: 领域推断 (基于视频 tname 分布)")
-    print("=" * 60)
-    from collections import Counter
-    from scripts import up_persona as up
-    tnames = [v.get("tname", "") for v in videos.values()]
-    counter = Counter(tnames)
-    print("  tname 分布:")
-    for tname, count in counter.most_common(10):
-        domain = up.DOMAIN_CATEGORY_MAP.get(tname, "其他")
-        print(f"    {tname}: {count}个 → 领域: {domain}")
-    # 模拟 _infer_domain
-    top_tname = counter.most_common(1)[0][0] if counter else ""
-    print(f"\n  最终领域: {up.DOMAIN_CATEGORY_MAP.get(top_tname, '其他')} (top tname: {top_tname})")
 
 
 async def main():
@@ -248,9 +232,7 @@ async def main():
     await test_up_space(auth, wbi, test_mid)
     videos = await test_up_videos(auth, wbi, test_mid, max_videos=args.videos)
 
-    if videos:
-        await test_infer_domain(videos)
-    else:
+    if not videos:
         print("\n未获取到视频，请检查 API 返回的 code/message 定位原因")
 
     print("\n" + "=" * 60)

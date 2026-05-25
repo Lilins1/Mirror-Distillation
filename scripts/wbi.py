@@ -40,6 +40,8 @@ class WbiSigner:
             resp = await client.get("https://api.bilibili.com/x/web-interface/nav")
             if resp.status_code != 200:
                 logger.warning("Wbi 密钥获取失败 (status=%d)", resp.status_code)
+                self._img_key = ""
+                self._sub_key = ""
                 return
             data = resp.json()
             wbi = data.get("data", {}).get("wbi_img", {})
@@ -54,9 +56,13 @@ class WbiSigner:
             self._last_fetch_time = time.time()
         except Exception as e:
             logger.warning("Wbi 密钥获取异常: %s", e)
+            self._img_key = ""
+            self._sub_key = ""
 
     def recalculate_keys(self):
         """强制下一次请求重新获取 Wbi 密钥"""
+        self._img_key = ""
+        self._sub_key = ""
         self._last_fetch_time = 0.0
 
     def sign(self, params: dict) -> dict:

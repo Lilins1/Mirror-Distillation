@@ -76,6 +76,7 @@ class PipelineConfig:
     max_input_chars: int = 40000
     enable_segmented_summary: bool = True
     cognitive_value_threshold: float = 20.0
+    dual_summary_threshold: float = 0.0        # 双摘要触发阈值 (0=沿用 cognitive_value_threshold)
     model_small: str = "deepseek-v4-flash"
     model_large: str = "deepseek-v4-pro"
 
@@ -90,16 +91,20 @@ class PipelineConfig:
     enable_stage5: bool = True
     stage5_model: str = "deepseek-reasoner"
 
+    # ---- Stage 2 (字幕提取) ----
+    stage2_account_label: str = "主账号"      # 字幕提取使用的B站账号: "主账号"=credential.json, 其他=guest_credential.json
+
     # ---- UP Persona Pipeline (Stage UP) ----
-    enable_up_persona: bool = True
+    enable_up_persona: bool = False
     up_follower_threshold: int = 1000000        # 最少粉丝数才纳入
-    up_view_threshold_factor: float = 0.07      # 0.007播放量门槛系数: sqrt(粉丝数) * factor = 采纳视频数
+    up_view_threshold_factor: float = 0.07      # 播放量门槛系数: sqrt(粉丝数) * factor = 采纳视频数
     up_max_video_count: int = 1000              # 单个UP最多抓取视频数上限
     up_persona_dir: str = field(init=False)    # data/up_persona/
     up_skill_template_path: str = "references/nuwa-skill/skill-template.md"
     up_framework_path: str = "references/nuwa-skill/extraction-framework.md"
     up_stage2_3_parallel: bool = True          # UP视频的字幕提取和总结是否并行
     up_model: str = "deepseek-v4-pro"          # UP Skill 生成模型
+    up_concurrency: int = 2                   # 同时处理多少个 UP (1=串行)
 
     # ---- Misc ----
     enable_local_whisper: bool = False

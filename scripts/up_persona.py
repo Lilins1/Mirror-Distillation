@@ -5,7 +5,6 @@
 """
 
 import os
-import json
 import math
 import random
 import shutil
@@ -17,11 +16,10 @@ from collections import defaultdict, Counter
 from typing import Optional
 
 import httpx
-from openai import AsyncOpenAI
-
 from .config import PipelineConfig, DeepSeekConfig
+from .llm_client import LLMClient
 from .auth import BilibiliAuth
-from .storage import DataStorage
+from .storage import DataStorage, is_valid_cog, compact_text
 from .extractor import Stage2Extractor
 from .summarizer import Stage3Summarizer
 from .wbi import WbiSigner
@@ -72,16 +70,6 @@ DOMAIN_CATEGORY_MAP = {
     "资讯": "资讯", "时事": "资讯", "军事": "资讯",
 }
 
-
-def _infer_domain(videos: dict) -> str:
-    """根据视频的 tname 众数推断 UP 专注领域，未匹配返回 '其他'"""
-    tnames = [v.get("metadata", {}).get("category", "") for v in videos.values()]
-    tnames = [t for t in tnames if t]
-    if not tnames:
-        return "其他"
-    # 取最常见的 tname
-    top_tname = Counter(tnames).most_common(1)[0][0]
-    return DOMAIN_CATEGORY_MAP.get(top_tname, "其他")
 
 
 def _domain_prompt_context(domain: str, up: dict) -> str:
@@ -291,6 +279,17 @@ class UpVideoCollector:
         headers = {"User-Agent": _random_ua(), "Referer": "https://space.bilibili.com/"}
 
         async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=15.0) as client:
+            # 预热: 验证 session 有效 + 预取 Wbi 密钥
+            warmup = await _fetch_json(client, "https://api.bilibili.com/x/web-interface/nav")
+            if not warmup.get("data", {}).get("mid"):
+                logger.error("  凭证无效 (nav返回无mid)，需要重新扫码登录")
+            await self._wbi._ensure_keys(client)
+            if not self._wbi._img_key or not self._wbi._sub_key:
+                logger.error("  Wbi 密钥获取失败，签名将无效")
+            else:
+                logger.debug("  Wbi 密钥就绪: img_key=%s..., sub_key=%s...",
+                            self._wbi._img_key[:8], self._wbi._sub_key[:8])
+
             bvids = await self._fetch_up_bvids(client, mid, max_count)
 
         logger.info("  %s: 获取 %d 个视频", up_name, len(bvids))
@@ -422,9 +421,10 @@ class UpResearchBuilder:
             md += f"## {cat} ({len(items)}个)\n"
             for n in items[:8]:
                 title = n.get("metadata", {}).get("title", "")
-                summary = n.get("ai_distillation", {}).get("summary", "")
-                ks = n.get("ai_distillation", {}).get("knowledge_value_score", 0)
-                md += f"- **[ks={ks}] {title}**\n  {summary[:200]}\n\n"
+                dl = n.get("ai_distillation", {})
+                summary = dl.get("summary_long", "") or dl.get("summary", "")
+                ks = dl.get("knowledge_value_score", 0)
+                md += f"- **[ks={ks}] {title}**\n  {summary[:300]}\n\n"
         return md
 
     def _gen_thinking(self, up: dict, nodes: list) -> str:
@@ -434,11 +434,11 @@ class UpResearchBuilder:
             cp = n.get("ai_distillation", {}).get("cognitive_profile", {})
             think = cp.get("thinking_mode", "")
             fw = cp.get("knowledge_framework", "")
-            if self._valid(think) or self._valid(fw):
+            if is_valid_cog(think) or is_valid_cog(fw):
                 md += f"### {n.get('metadata', {}).get('title', '')[:40]}\n"
-                if self._valid(think):
+                if is_valid_cog(think):
                     md += f"- 思维: {think}\n"
-                if self._valid(fw):
+                if is_valid_cog(fw):
                     md += f"- 框架: {fw}\n"
                 md += "\n"
                 count += 1
@@ -454,14 +454,14 @@ class UpResearchBuilder:
             style = cp.get("language_style", "")
             tone = cp.get("emotional_tone", "")
             arg = cp.get("argumentation_pattern", "")
-            if self._valid(style) or self._valid(tone) or self._valid(arg):
+            if is_valid_cog(style) or is_valid_cog(tone) or is_valid_cog(arg):
                 parts = []
-                if self._valid(style):
-                    parts.append(f"语言: {self._compact(style)}")
-                if self._valid(tone):
-                    parts.append(f"情绪: {self._compact(tone)}")
-                if self._valid(arg):
-                    parts.append(f"论证: {self._compact(arg)}")
+                if is_valid_cog(style):
+                    parts.append(f"语言: {compact_text(style)}")
+                if is_valid_cog(tone):
+                    parts.append(f"情绪: {compact_text(tone)}")
+                if is_valid_cog(arg):
+                    parts.append(f"论证: {compact_text(arg)}")
                 md += f"- **{n.get('metadata', {}).get('title', '')[:30]}**: " + " | ".join(parts) + "\n"
                 count += 1
                 if count >= 30:
@@ -475,12 +475,12 @@ class UpResearchBuilder:
             cp = n.get("ai_distillation", {}).get("cognitive_profile", {})
             beliefs = cp.get("core_beliefs", "")
             values = cp.get("values_preferences", "")
-            if self._valid(beliefs) or self._valid(values):
+            if is_valid_cog(beliefs) or is_valid_cog(values):
                 md += f"### {n.get('metadata', {}).get('title', '')[:40]}\n"
-                if self._valid(beliefs):
-                    md += f"- 信念: {self._compact(beliefs)}\n"
-                if self._valid(values):
-                    md += f"- 价值: {self._compact(values)}\n"
+                if is_valid_cog(beliefs):
+                    md += f"- 信念: {compact_text(beliefs)}\n"
+                if is_valid_cog(values):
+                    md += f"- 价值: {compact_text(values)}\n"
                 md += "\n"
                 count += 1
                 if count >= 20:
@@ -499,17 +499,6 @@ class UpResearchBuilder:
             md += f"- [{dt}] [{cat}] {title}\n"
         return md
 
-    @staticmethod
-    def _valid(text) -> bool:
-        if not text or not isinstance(text, str):
-            return False
-        low = text.lower()
-        return "insufficient_data" not in low and "无法推断" not in low
-
-    @staticmethod
-    def _compact(text: str, max_len: int = 120) -> str:
-        t = " ".join(text.split())
-        return t if len(t) <= max_len else t[:max_len - 3] + "..."
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -567,27 +556,18 @@ UP 名称: {up['name']}
 3. 以视频内容为准，不依赖 UP 签名或名称
 4. confidence: high=≥80%把握, medium=60-80%, low=<60%"""
 
-        client = AsyncOpenAI(api_key=ds_config.api_key, base_url=ds_config.base_url)
-        try:
-            resp = await client.chat.completions.create(
-                model=self._cfg.model_small,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.1,
-                max_tokens=300,
-                response_format={"type": "json_object"},
-            )
-            result = json.loads(resp.choices[0].message.content or "{}")
+        llm = LLMClient(ds_config)
+        result = await llm.chat_json(self._cfg.model_small, system, user, 300, 0.1)
+        if result:
             domain = result.get("domain", "其他")
             confidence = result.get("confidence", "low")
             reason = result.get("reason", "")
-            # 验证 domain 合法性
             if domain not in self.DOMAIN_OPTIONS:
                 domain = "其他"
             logger.info("  AI 领域分类: %s (confidence=%s) — %s", domain, confidence, reason)
             return domain
-        except Exception as e:
-            logger.warning("  领域分类失败，降级为 '其他': %s", e)
-            return "其他"
+        logger.warning("  领域分类失败，降级为 '其他'")
+        return "其他"
 
     async def generate(self, up: dict, up_dir: str, domain: str = "其他") -> Optional[str]:
         """生成人物 SKILL.md。domain 用于注入领域上下文提示。"""
@@ -662,19 +642,12 @@ UP 名称: {up['name']}
 
 生成策略：先在脑中证据筛选，按模板结构填充。不确定的写推测或不足。"""
 
-        client = AsyncOpenAI(api_key=ds.api_key, base_url=ds.base_url)
-        try:
-            resp = await client.chat.completions.create(
-                model=self._cfg.up_model,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.3,
-                max_tokens=24000,
-            )
-            raw = resp.choices[0].message.content or ""
+        llm = LLMClient(ds)
+        raw = await llm.chat_text(self._cfg.up_model, system, user, 24000, 0.3)
+        if raw:
             return self._strip_fences(raw)
-        except Exception as e:
-            logger.error("生成 %s 的 Skill 失败: %s", up["name"], e)
-            return None
+        logger.error("生成 %s 的 Skill 失败: %s", up["name"], "LLM 调用失败")
+        return None
 
     @staticmethod
     def _strip_fences(text: str) -> str:
@@ -742,157 +715,25 @@ class UpPersonaPipeline:
             qualified = qualified[:limit]
             logger.info("限制处理 %d 个 UP", limit)
 
-        # Step 2: 逐个 UP 处理
-        collector = UpVideoCollector(self._cfg)
-        extractor = Stage2Extractor(self._cfg)
-        summarizer = Stage3Summarizer(self._cfg)
-        research_builder = UpResearchBuilder(self._cfg)
-        persona_gen = UpPersonaGenerator(self._cfg)
-
+        # Step 2: 并行处理各 UP
         domain_counts = Counter()
+        counter_lock = asyncio.Lock()
+        total = len(qualified)
+        completed_count = [0]
 
-        for i, up in enumerate(qualified):
-            up_name = up["name"]
-            mid = up["mid"]
-            dir_name = self._sanitize_name(up_name)
-            logger.info("\n[UP %d/%d] %s (粉丝: %d)", i + 1, len(qualified), up_name, up["follower_count"])
+        sem = asyncio.Semaphore(max(1, self._cfg.up_concurrency))
 
-            try:
-                # ─── 2a: 查找已有数据（增量起点） ───
-                existing_dir = self._find_existing_dir(dir_name)
-                old_videos = {}
-                old_summaries = []
-                if existing_dir:
-                    old_idx_path = os.path.join(existing_dir, "videos_index.json")
-                    if os.path.exists(old_idx_path):
-                        old_videos_all = self._storage.load_json_or_default(old_idx_path, {})
-                        # 去掉 _domain 等元信息
-                        old_videos = {k: v for k, v in old_videos_all.items() if k.startswith("BV")}
-                    old_sum_dir = os.path.join(existing_dir, "summaries")
-                    if os.path.exists(old_sum_dir):
-                        for fn in os.listdir(old_sum_dir):
-                            if fn.endswith(".json"):
-                                try:
-                                    old_summaries.append(self._storage.load_json(os.path.join(old_sum_dir, fn)))
-                                except Exception:
-                                    pass
-                    logger.info("  已有 %d 个旧视频, %d 个旧总结 → %s",
-                                len(old_videos), len(old_summaries), existing_dir)
+        async def _run_one(i: int, up: dict):
+            async with sem:
+                result = await self._process_up(up, i + 1, total, max_videos)
+            async with counter_lock:
+                completed_count[0] += 1
+                if result:
+                    domain_counts[result] += 1
+                logger.info("[UP进度] %d/%d 完成", completed_count[0], total)
 
-                # ─── 2b: 抓取新视频（全量API拉取，与旧索引比对） ───
-                fresh_videos = await collector.collect(up, max_videos=max_videos)
-                if not fresh_videos:
-                    if not old_videos:
-                        logger.warning("  %s 无任何视频，跳过", up_name)
-                        continue
-                    fresh_videos = {}
-
-                # 合并: 新视频覆盖旧视频元数据
-                all_videos = {**old_videos, **fresh_videos}
-                old_bvids = set(old_videos.keys())
-                new_bvids = [b for b in fresh_videos if b not in old_bvids]
-                logger.info("  合并后 %d 个视频 (新增 %d)", len(all_videos), len(new_bvids))
-
-                # ─── 2c: 准备增量工作目录 ───
-                work_dir = os.path.join(self._cfg.up_persona_dir, dir_name)
-                sub_dir = os.path.join(work_dir, "subtitles")
-                sum_dir = os.path.join(work_dir, "summaries")
-                sub_progress = os.path.join(work_dir, "subtitle_progress.json")
-                sum_progress = os.path.join(work_dir, "summary_progress.json")
-                os.makedirs(work_dir, exist_ok=True)
-
-                # 如果已有旧数据，把旧进度拷贝过来（让 run_batch 跳过已处理的）
-                if existing_dir and not os.path.exists(sub_progress):
-                    old_sub_prog = os.path.join(existing_dir, "subtitle_progress.json")
-                    if os.path.exists(old_sub_prog):
-                        shutil.copy2(old_sub_prog, sub_progress)
-                if existing_dir and not os.path.exists(sum_progress):
-                    old_sum_prog = os.path.join(existing_dir, "summary_progress.json")
-                    if os.path.exists(old_sum_prog):
-                        shutil.copy2(old_sum_prog, sum_progress)
-
-                self._storage.safe_save_json(all_videos, os.path.join(work_dir, "videos_index.json"))
-
-                # ─── 2d: 只处理新视频的字幕 + 总结 ───
-                if new_bvids:
-                    new_videos_dict = {b: all_videos[b] for b in new_bvids}
-                    logger.info("  [1/5] 提取字幕 (%d 个新视频)...", len(new_bvids))
-                    await extractor.run_batch(new_videos_dict, sub_dir, sub_progress)
-
-                    logger.info("  [2/5] LLM 总结 (%d 个新视频)...", len(new_bvids))
-                    await summarizer.run_batch(new_videos_dict, sub_dir, sum_dir, sum_progress)
-                else:
-                    # 没新视频，确保旧版字幕/总结可用
-                    logger.info("  [1/5] 无新视频，跳过字幕提取")
-                    logger.info("  [2/5] 无新视频，跳过 LLM 总结")
-                    if existing_dir:
-                        self._merge_dirs(os.path.join(existing_dir, "subtitles"), sub_dir)
-                        self._merge_dirs(os.path.join(existing_dir, "summaries"), sum_dir)
-
-                # ─── 2e: 加载全部总结（旧 + 新） ───
-                all_summaries: list[dict] = list(old_summaries)
-                seen_bvids = {s.get("video_id", "") for s in all_summaries}
-                for bvid in all_videos:
-                    sp = os.path.join(sum_dir, f"{bvid}.json")
-                    if bvid not in seen_bvids and os.path.exists(sp):
-                        try:
-                            all_summaries.append(self._storage.load_json(sp))
-                        except Exception:
-                            pass
-                logger.info("  总计 %d 个有效总结", len(all_summaries))
-
-                if not all_summaries:
-                    logger.warning("  %s 无有效总结，跳过", up_name)
-                    continue
-
-                # ─── 2f: AI 领域分类 ───
-                logger.info("  [3/5] AI 领域分类...")
-                domain = await persona_gen.classify_domain(up, all_summaries)
-                old_domain = self._domain_from_path(existing_dir) if existing_dir else None
-                if old_domain and old_domain != domain:
-                    logger.info("  领域变更: %s → %s", old_domain, domain)
-
-                # ─── 2g: 迁移到最终领域目录 ───
-                domain_dir = os.path.join(self._cfg.up_persona_dir, domain)
-                final_dir = os.path.join(domain_dir, dir_name)
-                os.makedirs(domain_dir, exist_ok=True)
-
-                # 合并移动（不删旧目录，用 shutil.move 增量合并）
-                if os.path.exists(final_dir) and final_dir != work_dir:
-                    # 先把 work_dir 内容合并到 final_dir
-                    self._merge_dirs(work_dir, final_dir)
-                    if work_dir != final_dir and os.path.exists(work_dir):
-                        shutil.rmtree(work_dir)
-                elif work_dir != final_dir:
-                    if os.path.exists(final_dir):
-                        shutil.rmtree(final_dir)
-                    os.rename(work_dir, final_dir)
-
-                # 更新路径到最终目录
-                research_dir = os.path.join(final_dir, "research")
-                skill_path = os.path.join(final_dir, "SKILL.md")
-
-                # ─── 2h: 研究聚合 ───
-                logger.info("  [4/5] 研究聚合 (%s)...", domain)
-                reports = research_builder.build(up, all_summaries, domain)
-                os.makedirs(research_dir, exist_ok=True)
-                for fn, content in reports.items():
-                    self._storage.write_text(os.path.join(research_dir, fn), content)
-                logger.info("  → %d 个报告", len(reports))
-
-                # ─── 2i: 生成 SKILL.md ───
-                logger.info("  [5/5] 生成 SKILL.md (%s)...", domain)
-                skill_md = await persona_gen.generate(up, final_dir, domain)
-                if skill_md:
-                    self._storage.write_text(skill_path, skill_md)
-                    logger.info("  ✅ → %s", skill_path)
-                    domain_counts[domain] += 1
-                else:
-                    logger.error("  ❌ 生成失败: %s", up_name)
-
-            except Exception as e:
-                logger.exception("处理 UP %s 异常: %s", up_name, e)
-                continue
+        tasks = [_run_one(i, up) for i, up in enumerate(qualified)]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # 汇总
         logger.info("\n" + "=" * 60)
@@ -902,6 +743,196 @@ class UpPersonaPipeline:
         for domain, count in domain_counts.most_common():
             logger.info("  %s/: %d 个", domain, count)
         logger.info("=" * 60)
+
+    # ==================== per-UP processing ====================
+
+    async def _process_up(self, up: dict, index: int, total: int, max_videos: int = 0) -> Optional[str]:
+        """处理单个 UP 的完整流程。返回领域标签，失败返回 None。"""
+        up_name = up["name"]
+        dir_name = self._sanitize_name(up_name)
+        logger.info("\n[UP %d/%d] %s (粉丝: %d)", index, total, up_name, up["follower_count"])
+
+        collector = UpVideoCollector(self._cfg)
+        extractor = Stage2Extractor(self._cfg)
+        summarizer = Stage3Summarizer(self._cfg)
+        research_builder = UpResearchBuilder(self._cfg)
+        persona_gen = UpPersonaGenerator(self._cfg)
+
+        try:
+            # 2a: 查找已有数据（增量起点）
+            old_videos, old_summaries, existing_dir = self._load_existing(dir_name)
+
+            # 2b: 抓取+合并视频
+            result = await self._collect_videos(collector, up, max_videos, old_videos, up_name)
+            if result is None:
+                return None
+            all_videos, new_bvids = result
+
+            # 2c: 准备增量工作目录
+            work_dir, sub_dir, sum_dir, sub_progress, sum_progress = \
+                self._prepare_dirs(dir_name, existing_dir, all_videos)
+
+            # 2d: 字幕 + 总结
+            if new_bvids:
+                new_videos_dict = {b: all_videos[b] for b in new_bvids}
+                await self._run_extract_summarize(
+                    extractor, summarizer, new_videos_dict,
+                    sub_dir, sum_dir, sub_progress, sum_progress
+                )
+            else:
+                logger.info("  [1/5] 无新视频，跳过字幕提取")
+                logger.info("  [2/5] 无新视频，跳过 LLM 总结")
+                if existing_dir:
+                    self._merge_dirs(os.path.join(existing_dir, "subtitles"), sub_dir)
+                    self._merge_dirs(os.path.join(existing_dir, "summaries"), sum_dir)
+
+            # 2e: 加载全部总结
+            all_summaries: list[dict] = list(old_summaries)
+            seen_bvids = {s.get("video_id", "") for s in all_summaries}
+            for bvid in all_videos:
+                sp = os.path.join(sum_dir, f"{bvid}.json")
+                if bvid not in seen_bvids and os.path.exists(sp):
+                    try:
+                        all_summaries.append(self._storage.load_json(sp))
+                    except Exception:
+                        pass
+            logger.info("  总计 %d 个有效总结", len(all_summaries))
+
+            if not all_summaries:
+                logger.warning("  %s 无有效总结，跳过", up_name)
+                return None
+
+            # 2f: AI 领域分类
+            logger.info("  [3/5] AI 领域分类...")
+            domain = await persona_gen.classify_domain(up, all_summaries)
+            old_domain = self._domain_from_path(existing_dir) if existing_dir else None
+            if old_domain and old_domain != domain:
+                logger.info("  领域变更: %s → %s", old_domain, domain)
+
+            # 2g: 迁移到最终领域目录
+            domain_dir = os.path.join(self._cfg.up_persona_dir, domain)
+            final_dir = os.path.join(domain_dir, dir_name)
+            os.makedirs(domain_dir, exist_ok=True)
+
+            if os.path.exists(final_dir) and final_dir != work_dir:
+                self._merge_dirs(work_dir, final_dir)
+                if work_dir != final_dir and os.path.exists(work_dir):
+                    shutil.rmtree(work_dir)
+            elif work_dir != final_dir:
+                if os.path.exists(final_dir):
+                    shutil.rmtree(final_dir)
+                os.rename(work_dir, final_dir)
+
+            research_dir = os.path.join(final_dir, "research")
+            skill_path = os.path.join(final_dir, "SKILL.md")
+
+            # 2h: 研究聚合
+            logger.info("  [4/5] 研究聚合 (%s)...", domain)
+            reports = research_builder.build(up, all_summaries, domain)
+            os.makedirs(research_dir, exist_ok=True)
+            for fn, content in reports.items():
+                self._storage.write_text(os.path.join(research_dir, fn), content)
+            logger.info("  → %d 个报告", len(reports))
+
+            # 2i: 生成 SKILL.md
+            logger.info("  [5/5] 生成 SKILL.md (%s)...", domain)
+            skill_md = await persona_gen.generate(up, final_dir, domain)
+            if skill_md:
+                self._storage.write_text(skill_path, skill_md)
+                logger.info("  ✅ → %s", skill_path)
+                return domain
+            else:
+                logger.error("  ❌ 生成失败: %s (研究数据已保留在 %s)", up_name, research_dir)
+                return None
+
+        except Exception as e:
+            logger.exception("处理 UP %s 异常: %s", up_name, e)
+            return None
+
+    # ─── _process_up 子步骤 ───
+
+    def _load_existing(self, dir_name: str) -> tuple:
+        """扫描已有数据目录。返回 (old_videos, old_summaries, existing_dir)。"""
+        existing_dir = self._find_existing_dir(dir_name)
+        old_videos = {}
+        old_summaries = []
+        if existing_dir:
+            old_idx_path = os.path.join(existing_dir, "videos_index.json")
+            if os.path.exists(old_idx_path):
+                old_videos_all = self._storage.load_json_or_default(old_idx_path, {})
+                old_videos = {k: v for k, v in old_videos_all.items() if k.startswith("BV")}
+            old_sum_dir = os.path.join(existing_dir, "summaries")
+            if os.path.exists(old_sum_dir):
+                for fn in os.listdir(old_sum_dir):
+                    if fn.endswith(".json"):
+                        try:
+                            old_summaries.append(self._storage.load_json(os.path.join(old_sum_dir, fn)))
+                        except Exception:
+                            pass
+            logger.info("  已有 %d 个旧视频, %d 个旧总结 → %s",
+                        len(old_videos), len(old_summaries), existing_dir)
+        return old_videos, old_summaries, existing_dir
+
+    async def _collect_videos(self, collector: UpVideoCollector, up: dict, max_videos: int,
+                               old_videos: dict, up_name: str) -> Optional[tuple]:
+        """抓取新视频并与旧索引合并。返回 (all_videos, new_bvids) 或 None（无任何视频）。"""
+        fresh_videos = await collector.collect(up, max_videos=max_videos)
+        if not fresh_videos:
+            if not old_videos:
+                logger.warning("  %s 无任何视频，跳过", up_name)
+                return None
+            fresh_videos = {}
+
+        all_videos = {**old_videos, **fresh_videos}
+        old_bvids = set(old_videos.keys())
+        new_bvids = [b for b in fresh_videos if b not in old_bvids]
+        logger.info("  合并后 %d 个视频 (新增 %d)", len(all_videos), len(new_bvids))
+        return all_videos, new_bvids
+
+    def _prepare_dirs(self, dir_name: str, existing_dir: Optional[str],
+                       all_videos: dict) -> tuple:
+        """创建工作目录并拷贝旧进度。返回 (work_dir, sub_dir, sum_dir, sub_progress, sum_progress)。"""
+        work_dir = os.path.join(self._cfg.up_persona_dir, dir_name)
+        sub_dir = os.path.join(work_dir, "subtitles")
+        sum_dir = os.path.join(work_dir, "summaries")
+        sub_progress = os.path.join(work_dir, "subtitle_progress.json")
+        sum_progress = os.path.join(work_dir, "summary_progress.json")
+        os.makedirs(work_dir, exist_ok=True)
+
+        if existing_dir and not os.path.exists(sub_progress):
+            old_sub_prog = os.path.join(existing_dir, "subtitle_progress.json")
+            if os.path.exists(old_sub_prog):
+                shutil.copy2(old_sub_prog, sub_progress)
+        if existing_dir and not os.path.exists(sum_progress):
+            old_sum_prog = os.path.join(existing_dir, "summary_progress.json")
+            if os.path.exists(old_sum_prog):
+                shutil.copy2(old_sum_prog, sum_progress)
+
+        self._storage.safe_save_json(all_videos, os.path.join(work_dir, "videos_index.json"))
+        return work_dir, sub_dir, sum_dir, sub_progress, sum_progress
+
+    async def _run_extract_summarize(self, extractor: Stage2Extractor, summarizer: Stage3Summarizer,
+                                      new_videos: dict, sub_dir: str, sum_dir: str,
+                                      sub_progress: str, sum_progress: str):
+        """字幕提取 + LLM 总结，根据配置决定串行或并行"""
+        n = len(new_videos)
+        if self._cfg.up_stage2_3_parallel and n > 1:
+            logger.info("  [1+2/5] 并行提取字幕+总结 (%d 个新视频)...", n)
+            done = asyncio.Event()
+            ext_task = asyncio.create_task(
+                extractor.run_batch(new_videos, sub_dir, sub_progress)
+            )
+            sum_task = asyncio.create_task(
+                summarizer.run_batch_polling(new_videos, sub_dir, sum_dir, sum_progress, done)
+            )
+            await ext_task
+            done.set()
+            await sum_task
+        else:
+            logger.info("  [1/5] 提取字幕 (%d 个新视频)...", n)
+            await extractor.run_batch(new_videos, sub_dir, sub_progress)
+            logger.info("  [2/5] LLM 总结 (%d 个新视频)...", n)
+            await summarizer.run_batch(new_videos, sub_dir, sum_dir, sum_progress)
 
     # ─── 增量相关辅助方法 ───
 

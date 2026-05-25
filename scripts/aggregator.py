@@ -9,7 +9,7 @@ from datetime import datetime
 from collections import defaultdict
 
 from .config import PipelineConfig
-from .storage import DataStorage
+from .storage import DataStorage, is_valid_cog, compact_text
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,8 @@ class Stage4Aggregator:
         for n in nodes:
             cat = n["ai_distillation"].get("tags", {}).get("primary_category", "未分类")
             title = n["metadata"].get("title", "")
-            summary = n["ai_distillation"].get("summary", "").replace("\n", " ")
+            summary_long = n["ai_distillation"].get("summary_long", "")
+            summary = (summary_long or n["ai_distillation"].get("summary", "")).replace("\n", " ")
             cif = n["computed_cif"]
             cats[cat].append(f"- **[BV:{n['video_id']} | CIF:{cif:.1f}] {title}**\n  *{summary}")
         for cat, items in cats.items():
@@ -108,11 +109,11 @@ class Stage4Aggregator:
             p = n.get("ai_distillation", {}).get("cognitive_profile", {})
             beliefs = p.get("core_beliefs", "")
             values = p.get("values_preferences", "")
-            if self._valid(beliefs) or self._valid(values):
+            if is_valid_cog(beliefs) or is_valid_cog(values):
                 md += f"### BV:{n['video_id']} (CIF:{n['computed_cif']:.1f})\n"
-                if self._valid(beliefs):
+                if is_valid_cog(beliefs):
                     md += f"- 底层信念: {beliefs}\n"
-                if self._valid(values):
+                if is_valid_cog(values):
                     md += f"- 价值偏好: {values}\n"
                 md += "\n"
                 cnt += 1
@@ -127,7 +128,7 @@ class Stage4Aggregator:
             p = n.get("ai_distillation", {}).get("cognitive_profile", {})
             style = p.get("language_style", "")
             tone = p.get("emotional_tone", "")
-            if self._valid(style) or self._valid(tone):
+            if is_valid_cog(style) or is_valid_cog(tone):
                 md += f"- BV:{n['video_id']}: {style} | {tone}\n"
                 cnt += 1
                 if cnt >= 40:
@@ -149,32 +150,32 @@ class Stage4Aggregator:
 
             beliefs = p.get("core_beliefs", "")
             values = p.get("values_preferences", "")
-            if self._valid(beliefs) or self._valid(values):
+            if is_valid_cog(beliefs) or is_valid_cog(values):
                 parts = []
-                if self._valid(beliefs):
-                    parts.append(f"信念: {self._compact(beliefs)}")
-                if self._valid(values):
-                    parts.append(f"价值: {self._compact(values)}")
+                if is_valid_cog(beliefs):
+                    parts.append(f"信念: {compact_text(beliefs)}")
+                if is_valid_cog(values):
+                    parts.append(f"价值: {compact_text(values)}")
                 sections["价值与信念证据"].append(f"- BV:{bvid} | {cat} | CIF:{cif:.1f} | {' | '.join(parts)}")
 
             style = p.get("language_style", "")
             tone = p.get("emotional_tone", "")
-            if self._valid(style) or self._valid(tone):
+            if is_valid_cog(style) or is_valid_cog(tone):
                 parts = []
-                if self._valid(style):
-                    parts.append(f"风格: {self._compact(style)}")
-                if self._valid(tone):
-                    parts.append(f"情绪: {self._compact(tone)}")
+                if is_valid_cog(style):
+                    parts.append(f"风格: {compact_text(style)}")
+                if is_valid_cog(tone):
+                    parts.append(f"情绪: {compact_text(tone)}")
                 sections["表达偏好证据"].append(f"- BV:{bvid} | {cat} | CIF:{cif:.1f} | {' | '.join(parts)}")
 
             think = p.get("thinking_mode", "")
             dec = p.get("decision_pattern", "")
-            if self._valid(think) or self._valid(dec):
+            if is_valid_cog(think) or is_valid_cog(dec):
                 parts = []
-                if self._valid(think):
-                    parts.append(f"思维: {self._compact(think)}")
-                if self._valid(dec):
-                    parts.append(f"决策: {self._compact(dec)}")
+                if is_valid_cog(think):
+                    parts.append(f"思维: {compact_text(think)}")
+                if is_valid_cog(dec):
+                    parts.append(f"决策: {compact_text(dec)}")
                 sections["决策偏好证据"].append(f"- BV:{bvid} | {cat} | CIF:{cif:.1f} | {' | '.join(parts)}")
 
         for name, items in sections.items():
@@ -192,13 +193,13 @@ class Stage4Aggregator:
             think = p.get("thinking_mode", "")
             dec = p.get("decision_pattern", "")
             fw = p.get("knowledge_framework", "")
-            if self._valid(think) or self._valid(dec) or self._valid(fw):
+            if is_valid_cog(think) or is_valid_cog(dec) or is_valid_cog(fw):
                 md += f"### BV:{n['video_id']} ({n.get('ai_distillation', {}).get('tags', {}).get('primary_category', '')})\n"
-                if self._valid(think):
+                if is_valid_cog(think):
                     md += f"- 思维: {think}\n"
-                if self._valid(fw):
+                if is_valid_cog(fw):
                     md += f"- 框架: {fw}\n"
-                if self._valid(dec):
+                if is_valid_cog(dec):
                     md += f"- 决策: {dec}\n"
                 md += "\n"
                 cnt += 1
@@ -249,20 +250,6 @@ class Stage4Aggregator:
         return md
 
     # ==================== helpers ====================
-
-    @staticmethod
-    def _valid(text) -> bool:
-        if not text or not isinstance(text, str):
-            return False
-        low = text.lower()
-        return "insufficient_data" not in low and "无法推断" not in low
-
-    @staticmethod
-    def _compact(text: str, max_len: int = 140) -> str:
-        if not text or not isinstance(text, str):
-            return ""
-        text = " ".join(text.split())
-        return text if len(text) <= max_len else text[:max_len - 3] + "..."
 
     def _write_report(self, filename: str, content: str, run_ts: str):
         # latest

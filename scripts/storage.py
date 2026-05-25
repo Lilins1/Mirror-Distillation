@@ -55,3 +55,19 @@ class DataStorage:
             return None
         with open(filepath, "r", encoding="utf-8") as f:
             return f.read()
+
+
+def is_valid_cog(text) -> bool:
+    """认知画像字段是否有实质内容（非 insufficient_data）"""
+    if not text or not isinstance(text, str):
+        return False
+    low = text.lower()
+    return "insufficient_data" not in low and "无法推断" not in low
+
+
+def compact_text(text: str, max_len: int = 140) -> str:
+    """压缩文本到指定长度（去除多余空白）"""
+    if not text or not isinstance(text, str):
+        return ""
+    t = " ".join(text.split())
+    return t if len(t) <= max_len else t[:max_len - 3] + "..."

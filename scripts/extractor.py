@@ -58,7 +58,7 @@ class Stage2Extractor:
 
     def __init__(self, config: PipelineConfig):
         self._cfg = config
-        self._auth = BilibiliAuth(config.account_dir, label="小号")
+        self._auth = BilibiliAuth(config.account_dir, label=config.stage2_account_label)
         self._storage = DataStorage()
         self._sponsor = SponsorBlockClient(config.sponsor_block_categories)
 
