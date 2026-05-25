@@ -31,7 +31,7 @@ class WbiSigner:
         self._img_key: str = ""
         self._sub_key: str = ""
         self._last_fetch_time: float = 0.0
-        self._ttl: float = 600.0  # 10 分钟刷新一次 key
+        self._ttl: float = 240.0  # 4 分钟刷新一次 key（避免长休眠后过期）
 
     async def _ensure_keys(self, client: httpx.AsyncClient):
         if self._img_key and self._sub_key and (time.time() - self._last_fetch_time) < self._ttl:

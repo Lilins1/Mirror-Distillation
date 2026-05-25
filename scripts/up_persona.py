@@ -323,13 +323,8 @@ class UpVideoCollector:
         result = {}
         page = 1
         consecutive_failures = 0
+        pages_since_deep_sleep = 0                     # 成功翻页计数，用于防封控休眠
         while len(result) < count:
-            # 每 3 页做一次深度休眠
-            if page > 1 and (page - 1) % 3 == 0:
-                deep = random.uniform(30, 60)
-                logger.info("  翻页防封控，休眠 %.0f 秒...", deep)
-                await asyncio.sleep(deep)
-
             data = await self._wbi.signed_get_json(
                 client,
                 "https://api.bilibili.com/x/space/wbi/arc/search",
@@ -365,7 +360,16 @@ class UpVideoCollector:
             if len(vlist) < 50:
                 break
             page += 1
-            await asyncio.sleep(random.uniform(8.0, 15.0))
+            pages_since_deep_sleep += 1
+
+            # 每 3 页做一次深度休眠（仅在成功翻页后）
+            if pages_since_deep_sleep >= 3:
+                deep = random.uniform(30, 60)
+                logger.info("  翻页防封控，休眠 %.0f 秒...", deep)
+                await asyncio.sleep(deep)
+                pages_since_deep_sleep = 0
+            else:
+                await asyncio.sleep(random.uniform(8.0, 15.0))
         return result
 
     @staticmethod
