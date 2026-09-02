@@ -1,14 +1,14 @@
 """UP 主人物 Skill 管线 — 抓取关注的高粉 UP，按专注领域分类，
 提取视频内容，参照 nuwa-skill 模板生成第一人称人物 SKILL.md
 
-复用: BilibiliAuth / DataStorage / Stage2Extractor.run_batch() / Stage3Summarizer.run_batch()
+复用: bilibili-cli (认证/用户/音频) / DataStorage / Stage2Extractor.run_batch() / Stage3Summarizer.run_batch()
 """
 
 import os
-import math
 import random
 import shutil
-import time
+import json
+import subprocess
 import asyncio
 import logging
 from datetime import datetime
@@ -98,49 +98,66 @@ async def _fetch_json(client: httpx.AsyncClient, url: str, referer: str = "https
     return resp.json() if resp.status_code == 200 else {}
 
 
+def _bili_cli(args: list[str], timeout: int = 60) -> Optional[dict]:
+    """调用 bilibili-cli 并返回 JSON envelope。失败返回 None。"""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    try:
+        result = subprocess.run(
+            ["bili"] + args + ["--json"],
+            capture_output=True, timeout=timeout, env=env,
+            encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0:
+            logger.debug("bili-cli 返回非零: %s", result.stderr[:200])
+            return None
+        return json.loads(result.stdout) if result.stdout.strip() else None
+    except FileNotFoundError:
+        logger.error("未找到 bilibili-cli (bili)，请先 `uv tool install bilibili-cli` 并激活环境")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.debug("bili-cli 超时: %s", " ".join(args))
+        return None
+    except Exception as e:
+        logger.debug("bili-cli 调用异常: %s", e)
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════
 # UpFollowFetcher
 # ═══════════════════════════════════════════════════════════════════
 
 class UpFollowFetcher:
-    """获取登录用户关注的所有 UP，拉取基础信息并过滤"""
+    """获取登录用户关注的所有 UP，拉取基础信息并过滤。
+    通过 bilibili-cli 调用，简化认证和 API 调用。
+    """
 
     def __init__(self, config: PipelineConfig):
         self._cfg = config
-        self._auth = BilibiliAuth(config.account_dir, label="主账号")
         self._storage = DataStorage()
-        self._wbi = WbiSigner()
 
     async def fetch(self) -> list[dict]:
-        cred = await self._auth.get_credential()
-        cookies = self._auth.get_cookies()
-        headers = {"User-Agent": _random_ua(), "Referer": "https://www.bilibili.com/"}
-        async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=15.0) as client:
-            my_uid = await self._get_my_uid(client)
-            logger.info("我的 UID: %s", my_uid)
+        # 一次性获取完整关注列表 (bilibili-cli 内部处理分页+认证)
+        all_follows = await self._get_followings()
+        logger.info("共关注 %d 个 UP", len(all_follows))
 
-            all_follows = await self._get_followings(client, my_uid)
-            logger.info("共关注 %d 个 UP", len(all_follows))
+        ups = []
+        continuous = 0
+        pause_threshold = random.randint(100, 150)
 
-            ups = []
-            continuous = 0
-            pause_threshold = random.randint(100, 150)  # 每 70-120 个 UP 休眠
+        for i, mid in enumerate(all_follows):
+            if continuous >= pause_threshold:
+                await self._deep_sleep()
+                continuous = 0
+                pause_threshold = random.randint(100, 150)
 
-            for i, mid in enumerate(all_follows):
-                # 深度休眠防封控
-                if continuous >= pause_threshold:
-                    await self._deep_sleep()
-                    continuous = 0
-                    pause_threshold = random.randint(100, 150)
-
-                info = await self._get_up_info(client, mid)
-                continuous += 1
-                if info:
-                    ups.append(info)
-                if (i + 1) % 20 == 0:
-                    logger.info("  UP info: %d/%d (连续: %d, 休眠阈值: %d)",
-                                i + 1, len(all_follows), continuous, pause_threshold)
-                await asyncio.sleep(random.uniform(1.5, 3.5))
+            info = await self._get_up_info(mid)
+            continuous += 1
+            if info:
+                ups.append(info)
+            if (i + 1) % 20 == 0:
+                logger.info("  UP info: %d/%d (连续: %d, 休眠阈值: %d)",
+                            i + 1, len(all_follows), continuous, pause_threshold)
+            await asyncio.sleep(random.uniform(1.5, 3.5))
 
         threshold = self._cfg.up_follower_threshold
         qualified = [u for u in ups if u.get("follower_count", 0) >= threshold]
@@ -154,83 +171,54 @@ class UpFollowFetcher:
         self._storage.safe_save_json(qualified, out)
         return qualified
 
-    async def _get_my_uid(self, client: httpx.AsyncClient) -> int:
-        data = await _fetch_json(client, "https://api.bilibili.com/x/web-interface/nav")
-        return data.get("data", {}).get("mid", 0)
-
-    async def _get_followings(self, client: httpx.AsyncClient, uid: int) -> list[int]:
+    async def _get_followings(self) -> list[int]:
+        """通过 bilibili-cli 分页获取全部关注 UID 列表 (bili following 每页 20 条)。"""
+        loop = asyncio.get_running_loop()
         mids = []
+        seen = set()
         page = 1
-        consecutive_failures = 0
         while True:
-            url = f"https://api.bilibili.com/x/relation/followings?vmid={uid}&pn={page}&ps=50&order=desc"
-            data = await _fetch_json(client, url)
-            items = data.get("data", {}).get("list", [])
-
+            data = await loop.run_in_executor(
+                None, _bili_cli, ["following", "--page", str(page)], 120
+            )
+            if not data or not data.get("ok"):
+                if page == 1:
+                    logger.error("获取关注列表失败: %s",
+                                 data.get("error", {}).get("message", "unknown") if data else "no response")
+                break
+            items = data.get("data", {}).get("items", [])
             if not items:
-                consecutive_failures += 1
-                if consecutive_failures >= 4:
-                    logger.warning("  关注列表连续 %d 次空响应，停止翻页", consecutive_failures)
-                    break
-                backoff = min(10 * (2 ** consecutive_failures), 120)
-                logger.info("  关注列表第 %d 页空响应，%d秒后重试...", page, backoff)
-                await asyncio.sleep(backoff)
-                continue
-            consecutive_failures = 0
-
+                break
             for item in items:
-                mids.append(item.get("mid", 0))
-            if len(mids) >= data.get("data", {}).get("total", 0):
+                mid = item.get("id")
+                if mid and mid not in seen:
+                    seen.add(mid)
+                    mids.append(int(mid))
+            if len(items) < 20:  # 不足一页，说明已到最后
                 break
             page += 1
-
-            # 每 5 页深度休眠
-            if (page - 1) % 5 == 0:
-                deep = random.uniform(20, 40)
-                logger.info("  关注列表翻页防封控，休眠 %.0f 秒...", deep)
-                await asyncio.sleep(deep)
-            else:
-                await asyncio.sleep(random.uniform(3.0, 6.0))
         return mids
 
-    async def _get_up_info(self, client: httpx.AsyncClient, mid: int) -> Optional[dict]:
-        try:
-            card = await _fetch_json(client, f"https://api.bilibili.com/x/web-interface/card?mid={mid}")
-            cdata = card.get("data", {})
-            card_info = cdata.get("card", {})
-            if not card_info.get("name"):
-                return None
-            follower_count = cdata.get("follower", 0)
-            if isinstance(follower_count, str):
-                follower_count = self._parse_count_str(follower_count)
-            # 使用 Wbi 签名的 space API
-            space = await self._wbi.signed_get_json(
-                client,
-                "https://api.bilibili.com/x/space/wbi/acc/info",
-                params={"mid": str(mid)}
-            )
-            sign = space.get("data", {}).get("sign", "")
-            return {
-                "mid": mid,
-                "name": card_info.get("name", ""),
-                "follower_count": follower_count,
-                "face": card_info.get("face", ""),
-                "sign": sign,
-                "official": card_info.get("Official", {}).get("title", ""),
-            }
-        except Exception as e:
-            logger.debug("获取 UP %d 信息失败: %s", mid, e)
+    async def _get_up_info(self, mid: int) -> Optional[dict]:
+        """通过 bilibili-cli 获取单个 UP 的详细信息。"""
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, _bili_cli, ["user", str(mid)]
+        )
+        if not data or not data.get("ok"):
+            logger.debug("获取 UP %d 信息失败", mid)
             return None
-
-    @staticmethod
-    def _parse_count_str(s: str) -> int:
-        s = str(s).strip()
-        if "万" in s:
-            return int(float(s.replace("万", "")) * 10000)
-        try:
-            return int(s)
-        except ValueError:
-            return 0
+        payload = data.get("data", {})
+        user = payload.get("user", {})
+        if not user.get("name"):
+            return None
+        return {
+            "mid": mid,
+            "name": user.get("name", ""),
+            "follower_count": payload.get("relation", {}).get("follower", 0),
+            "face": "",
+            "sign": user.get("sign", "") or "",
+            "official": "",
+        }
 
     @staticmethod
     async def _deep_sleep():
@@ -311,7 +299,7 @@ class UpVideoCollector:
                     "description": info.get("description", ""),
                     "tags": [],
                 },
-                "cognitive_impact_factor": 5.0,
+                "cognitive_impact_factor": 2.5,  # 无个人互动信号的中性基线；过高会让每个视频都触发大模型深度分析
                 "interaction_status": {
                     "coin_count": 0, "is_favorited": False, "is_liked": False,
                 },
@@ -694,10 +682,7 @@ class UpPersonaPipeline:
         if single_uid:
             logger.info("单 UP 测试模式: mid=%d", single_uid)
             fetcher = UpFollowFetcher(self._cfg)
-            cookies = fetcher._auth.get_cookies()
-            headers = {"User-Agent": _random_ua()}
-            async with httpx.AsyncClient(cookies=cookies, headers=headers, timeout=15.0) as client:
-                info = await fetcher._get_up_info(client, single_uid)
+            info = await fetcher._get_up_info(single_uid)
             if not info:
                 logger.error("无法获取 UP %d 信息", single_uid)
                 return

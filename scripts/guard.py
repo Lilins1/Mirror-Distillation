@@ -21,7 +21,7 @@ class StartupGuard:
         self._cfg = config or PipelineConfig()
         self._state_file = os.path.join(self._cfg.system_dir, "startup_guard_state.json")
         self._log_file = os.path.join(self._cfg.system_dir, "startup_guard.log")
-        self._pipeline_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pipeline_runner.py")
+        self._project_root = os.path.dirname(os.path.dirname(__file__))
 
     # ==================== main entry ====================
 
@@ -61,8 +61,19 @@ class StartupGuard:
 
     # ==================== execution ====================
 
+    @staticmethod
+    def _resolve_python() -> str:
+        """pythonw.exe 是 GUI 子系统，标准流默认 GBK 编码，print/click 输出中文或 emoji 会
+        UnicodeEncodeError 崩溃（历史退出码 1073807364 的根因）。优先改用同目录的 python.exe。"""
+        exe = sys.executable
+        if os.path.basename(exe).lower() == "pythonw.exe":
+            alt = os.path.join(os.path.dirname(exe), "python.exe")
+            if os.path.exists(alt):
+                return alt
+        return exe
+
     def _exec_pipeline(self, stage: str, debug: bool) -> int:
-        cmd = [sys.executable, self._pipeline_file, "--stage", stage]
+        cmd = [self._resolve_python(), "-m", "scripts.pipeline", "--stage", stage]
         if debug:
             cmd.append("--debug")
         self._log(f"执行: {' '.join(cmd)}")
@@ -71,7 +82,14 @@ class StartupGuard:
         if sys.platform == "win32":
             kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
 
-        result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(__file__)), **kwargs)
+        # 强制 UTF-8 标准流 + 重定向到文件：无窗口下既不因 GBK 编码崩溃，也不丢失输出
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        console_log = os.path.join(self._cfg.system_dir, "pipeline_console.log")
+        with open(console_log, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} stage={stage} =====\n")
+            result = subprocess.run(cmd, cwd=self._project_root,
+                                    stdout=f, stderr=subprocess.STDOUT, env=env, **kwargs)
+
         self._log(f"退出码: {result.returncode}")
         return int(result.returncode)
 

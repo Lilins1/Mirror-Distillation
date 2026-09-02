@@ -37,6 +37,7 @@ class PipelineConfig:
     research_dir: str = field(init=False)
     history_dir: str = field(init=False)
     system_dir: str = field(init=False)
+    log_dir: str = field(init=False)
     credential_path: str = field(init=False)
     guest_credential_path: str = field(init=False)
     deepseek_config_path: str = field(init=False)
@@ -89,7 +90,7 @@ class PipelineConfig:
 
     # ---- Stage 5 ----
     enable_stage5: bool = True
-    stage5_model: str = "deepseek-reasoner"
+    stage5_model: str = "deepseek-v4-pro"      # 人物 SKILL 生成，不需要深度推理，v4-pro 更快
 
     # ---- Stage 2 (字幕提取) ----
     stage2_account_label: str = "主账号"      # 字幕提取使用的B站账号: "主账号"=credential.json, 其他=guest_credential.json
@@ -106,9 +107,14 @@ class PipelineConfig:
     up_model: str = "deepseek-v4-pro"          # UP Skill 生成模型
     up_concurrency: int = 2                   # 同时处理多少个 UP (1=串行)
 
+    # ---- Whisper 本地兜底 (Stage 2) ----
+    enable_local_whisper: bool = True      # 字幕/总结都拿不到时走本地语音转文字
+    whisper_model_size: str = "large-v3"     # tiny(1G)/small(2.4G)/medium(6G)/large-v3; 多语混用选large-v3
+    whisper_device: str = "cuda"           # cuda / cpu
+    whisper_compute_type: str = "float16"  # float16 / int8_float16 (低显存) / int8
+    whisper_language: str = "zh"           # ""=auto "zh"=强制中文; 中外混剪纪录片开头可能是外语，auto会误判
+
     # ---- Misc ----
-    enable_local_whisper: bool = False
-    whisper_model_size: str = "small"
 
     def __post_init__(self):
         d = self.data_dir
@@ -122,6 +128,7 @@ class PipelineConfig:
         self.research_dir = os.path.join(self.persona_dir, "references", "research")
         self.history_dir = os.path.join(self.persona_dir, "history")
         self.system_dir = os.path.join(d, "system")
+        self.log_dir = os.path.join(self.system_dir, "logs")
         self.credential_path = os.path.join(self.account_dir, "credential.json")
         self.guest_credential_path = os.path.join(self.account_dir, "guest_credential.json")
         self.deepseek_config_path = os.path.join(self.account_dir, "deepseek_config.json")
@@ -140,5 +147,5 @@ class PipelineConfig:
         for p in [self.account_dir, self.stage1_dir, self.enrich_dir,
                    self.stage2_dir, self.subtitles_dir, self.stage3_dir,
                    self.persona_dir, self.research_dir, self.history_dir,
-                   self.system_dir, self.up_persona_dir]:
+                   self.system_dir, self.log_dir, self.up_persona_dir]:
             os.makedirs(p, exist_ok=True)

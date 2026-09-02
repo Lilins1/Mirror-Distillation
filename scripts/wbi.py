@@ -37,7 +37,12 @@ class WbiSigner:
         if self._img_key and self._sub_key and (time.time() - self._last_fetch_time) < self._ttl:
             return
         try:
-            resp = await client.get("https://api.bilibili.com/x/web-interface/nav")
+            # nav 接口不能带 space.bilibili.com 的 Referer（会污染 Wbi 密钥）
+            ua = client.headers.get("User-Agent", "")
+            resp = await client.get(
+                "https://api.bilibili.com/x/web-interface/nav",
+                headers={"User-Agent": ua, "Referer": "https://www.bilibili.com/"}
+            )
             if resp.status_code != 200:
                 logger.warning("Wbi 密钥获取失败 (status=%d)", resp.status_code)
                 self._img_key = ""

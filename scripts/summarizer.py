@@ -199,12 +199,12 @@ class Stage3Summarizer:
                     ds_config, full_text, title, desc, tags, impact, text_len
                 )
             else:
-                chosen_model = self._select_model(impact, text_len)
+                chosen_model = self._cfg.model_small
                 ai_result = await self._summarize_single(
                     ds_config, full_text, metadata.get("title", ""),
                     metadata.get("description", ""), metadata.get("tags", []),
                     text_len, impact, bvid,
-                    int(metadata.get("duration", 0)), chosen_model,
+                    int(metadata.get("duration", 0)),
                 )
                 if not ai_result:
                     ai_result = {"mode": "failed", "summary": "", "tags": {},
@@ -279,15 +279,17 @@ class Stage3Summarizer:
 
     async def _summarize_single(self, ds_config: DeepSeekConfig, full_text: str, title: str,
                                  desc: str, tags: list, text_len: int, impact: float,
-                                 bvid: str, duration: int, chosen_model: str) -> Optional[dict]:
-        """根据 CIF 分数决定精简摘要或双摘要（短+长并行）"""
+                                 bvid: str, duration: int) -> Optional[dict]:
+        """根据 CIF 分数决定精简摘要或双摘要（短+长并行）。
+
+        模型策略：基本总结（低要求）统一走 flash；深度画像（高要求）才用 pro。
+        """
         score_metric = self._calc_score(impact, text_len)
         dual_threshold = self._cfg.dual_summary_threshold if self._cfg.dual_summary_threshold > 0 else self._cfg.cognitive_value_threshold
         enable_dual = score_metric >= dual_threshold and text_len > 300
 
-        # 简短内容用 flash 做长摘要没意义，统一走精简
-        long_model = self._cfg.model_large if score_metric > self._cfg.high_value_threshold else chosen_model
-        short_model = chosen_model
+        short_model = self._cfg.model_small
+        long_model = self._cfg.model_large
 
         if enable_dual:
             sp_s, up_s, tok_s = self._build_short_prompt(full_text, title, desc, tags, text_len, impact)
@@ -349,12 +351,12 @@ class Stage3Summarizer:
             await asyncio.sleep(random.uniform(2.0, 5.0))
 
         merged = "\n\n---\n\n".join(seg_summaries)
-        chosen_model = self._select_model(impact, len(merged))
+        chosen_model = self._cfg.model_small
 
         # 对合并后的分段摘要应用双摘要逻辑
         ai_result = await self._summarize_single(
             ds_config, merged, title, desc, tags, len(merged), impact,
-            f"{title[:10]}...(分段)", text_len, chosen_model
+            f"{title[:10]}...(分段)", text_len
         )
         if not ai_result:
             ai_result = {"mode": "segmented_fallback", "summary": merged, "tags": {}, "knowledge_value_score": 0, "is_ad_contaminated": False}
@@ -471,10 +473,6 @@ class Stage3Summarizer:
     @staticmethod
     def _calc_score(impact: float, text_len: int) -> float:
         return impact * math.log(text_len + 1) if text_len > 0 else 0.0
-
-    def _select_model(self, impact: float, text_len: int) -> str:
-        score = self._calc_score(impact, text_len)
-        return self._cfg.model_large if score > self._cfg.high_value_threshold else self._cfg.model_small
 
     @staticmethod
     def _split_text(text: str, max_chars: int) -> list:

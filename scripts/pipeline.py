@@ -5,6 +5,7 @@ import sys
 import asyncio
 import argparse
 import logging
+from datetime import datetime
 
 from .config import PipelineConfig
 from .collector import Stage1Collector
@@ -107,15 +108,33 @@ class PipelineRunner:
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     @staticmethod
-    def _setup_logging(debug: bool = False):
+    def _setup_logging(debug: bool = False, log_dir: str = None):
         level = logging.DEBUG if debug else logging.INFO
-        fmt = "%(asctime)s [%(levelname)-5s] %(name)-22s %(message)s" if debug else "[%(levelname)-5s] %(message)s"
-        logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
+        console_fmt = ("%(asctime)s [%(levelname)-5s] %(name)-22s %(message)s"
+                       if debug else "[%(levelname)-5s] %(message)s")
+        file_fmt = "%(asctime)s [%(levelname)-5s] %(name)-22s %(message)s"
+
+        handlers = [logging.StreamHandler()]
+        handlers[0].setFormatter(logging.Formatter(console_fmt, datefmt="%H:%M:%S"))
+
+        log_path = ""
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, f"run_{datetime.now():%Y%m%d_%H%M%S}.log")
+            fh = logging.FileHandler(log_path, encoding="utf-8")
+            fh.setFormatter(logging.Formatter(file_fmt, datefmt="%Y-%m-%d %H:%M:%S"))
+            handlers.append(fh)
+
+        logging.basicConfig(level=level, handlers=handlers, force=True)
+
         # suppress noisy third-party loggers
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("openai").setLevel(logging.WARNING)
         logging.getLogger("bilibili_api").setLevel(logging.WARNING)
+
+        if log_path:
+            logging.getLogger(__name__).info("本次运行日志: %s", log_path)
 
     @classmethod
     def main(cls):
@@ -127,11 +146,12 @@ class PipelineRunner:
         parser.add_argument("--debug", action="store_true", help="启用 DEBUG 模式")
         args = parser.parse_args()
 
-        cls._setup_logging(debug=args.debug)
-
         config = PipelineConfig()
         if args.debug:
             config.debug_mode = True
+
+        cls._setup_logging(debug=args.debug, log_dir=config.log_dir)
+        if args.debug:
             logger.info("[DEBUG] 已启用")
 
         runner = cls(config)
