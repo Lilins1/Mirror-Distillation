@@ -149,6 +149,8 @@ class PipelineRunner:
         config = PipelineConfig()
         if args.debug:
             config.debug_mode = True
+        if args.stage == "up":
+            config.enable_up_persona = True
 
         cls._setup_logging(debug=args.debug, log_dir=config.log_dir)
         if args.debug:

@@ -112,7 +112,7 @@ Bilili_mirror_distill/
 │   ├── stage4_persona_builder/       # 研究报告 + 最终 SKILL.md
 │   ├── system/                       # 守护器状态 & 日志
 │   └── up_persona/                   # UP Persona 输出 ({领域}/{用户名}/)
-├── pipeline_runner.py                # 入口脚本 (向后兼容)
+├── legacy/                           # 已归档的旧版入口与 stage 脚本 (不再使用)
 └── readme.md
 ```
 
@@ -291,7 +291,7 @@ python -m scripts.guard --force
 | `parallel_stage2_3` | `True` | Stage 2/3 并行 |
 | `enable_segmented_summary` | `True` | 长文本分段总结 |
 | `model_small` | `"deepseek-v4-flash"` | 普通节点模型 |
-| `model_large` | `"deepseek-v4-pro"` | 高价值节点模型 |
+| `model_large` | `"deepseek-v4-flash"` | 高价值节点模型（已统一使用 flash） |
 
 ### Stage 4
 
@@ -305,7 +305,7 @@ python -m scripts.guard --force
 | 字段 | 默认值 | 说明 |
 |---|---|---|
 | `enable_stage5` | `True` | 启用 Skill 生成 |
-| `stage5_model` | `"deepseek-reasoner"` | Skill 生成模型 |
+| `stage5_model` | `"deepseek-v4-flash"` | Skill 生成模型 |
 
 ### UP Persona
 
@@ -315,7 +315,7 @@ python -m scripts.guard --force
 | `up_follower_threshold` | `1000000` | 最少粉丝数 |
 | `up_view_threshold_factor` | `0.07` | 播放量门槛系数 |
 | `up_max_video_count` | `1000` | 单个 UP 最多抓取视频数 |
-| `up_model` | `"deepseek-v4-pro"` | Skill 生成模型 |
+| `up_model` | `"deepseek-v4-flash"` | Skill 生成模型 |
 
 ### 调试
 

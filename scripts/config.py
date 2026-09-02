@@ -79,7 +79,7 @@ class PipelineConfig:
     cognitive_value_threshold: float = 20.0
     dual_summary_threshold: float = 0.0        # 双摘要触发阈值 (0=沿用 cognitive_value_threshold)
     model_small: str = "deepseek-v4-flash"
-    model_large: str = "deepseek-v4-pro"
+    model_large: str = "deepseek-v4-flash"
 
     # ---- Stage 4 ----
     enable_stage4: bool = True
@@ -90,7 +90,7 @@ class PipelineConfig:
 
     # ---- Stage 5 ----
     enable_stage5: bool = True
-    stage5_model: str = "deepseek-v4-pro"      # 人物 SKILL 生成，不需要深度推理，v4-pro 更快
+    stage5_model: str = "deepseek-v4-flash"    # 统一使用 flash 模型
 
     # ---- Stage 2 (字幕提取) ----
     stage2_account_label: str = "主账号"      # 字幕提取使用的B站账号: "主账号"=credential.json, 其他=guest_credential.json
@@ -104,7 +104,7 @@ class PipelineConfig:
     up_skill_template_path: str = "references/nuwa-skill/skill-template.md"
     up_framework_path: str = "references/nuwa-skill/extraction-framework.md"
     up_stage2_3_parallel: bool = True          # UP视频的字幕提取和总结是否并行
-    up_model: str = "deepseek-v4-pro"          # UP Skill 生成模型
+    up_model: str = "deepseek-v4-flash"        # 统一使用 flash 模型
     up_concurrency: int = 2                   # 同时处理多少个 UP (1=串行)
 
     # ---- Whisper 本地兜底 (Stage 2) ----

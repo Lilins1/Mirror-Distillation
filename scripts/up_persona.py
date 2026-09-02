@@ -635,7 +635,7 @@ UP 名称: {up['name']}
 生成策略：先在脑中证据筛选，按模板结构填充。不确定的写推测或不足。"""
 
         llm = LLMClient(ds)
-        raw = await llm.chat_text(self._cfg.up_model, system, user, 24000, 0.3)
+        raw = await llm.chat_text(self._cfg.up_model, system, user, 16000, 0.3)
         if raw:
             return self._strip_fences(raw)
         logger.error("生成 %s 的 Skill 失败: %s", up["name"], "LLM 调用失败")

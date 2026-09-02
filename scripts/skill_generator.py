@@ -4,10 +4,9 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from openai import AsyncOpenAI
-
 from .config import PipelineConfig, DeepSeekConfig
 from .storage import DataStorage
+from .llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -110,19 +109,15 @@ class SkillGenerator:
 """
 
         logger.info("调用 %s 直渲染 SKILL.md...", self._cfg.stage5_model)
-        client = AsyncOpenAI(api_key=ds_config.api_key, base_url=ds_config.base_url)
-        try:
-            resp = await client.chat.completions.create(
-                model=self._cfg.stage5_model,
-                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.2,
-                max_tokens=32000,
-            )
-            raw = resp.choices[0].message.content or ""
-            return self._strip_fences(raw)
-        except Exception as e:
-            logger.error("LLM 调用失败: %s", e)
+        client = LLMClient(ds_config)
+        raw = await client.chat_text(
+            self._cfg.stage5_model, system, user,
+            max_tokens=16000, temperature=0.2,
+        )
+        if raw is None:
+            logger.error("LLM 调用失败: SKILL.md 生成未返回内容")
             return None
+        return self._strip_fences(raw)
 
     def _write_output(self, skill_md: str, run_ts: str):
         # latest
